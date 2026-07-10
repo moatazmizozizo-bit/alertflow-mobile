@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AlertFlow Mobile - Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #fff; min-height: 100vh; display: flex; justify-content: center; align-items: center; }
+  .phone { width: 390px; height: 844px; background: #1a1a2e; border-radius: 44px; border: 2px solid #ffffff20; overflow: hidden; display: flex; flex-direction: column; position: relative; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .status-bar { display: flex; justify-content: space-between; padding: 14px 24px 8px; font-size: 12px; color: #ffffff80; }
+  .content { flex: 1; overflow-y: auto; padding: 0 20px 20px; }
+  .content::-webkit-scrollbar { width: 4px; }
+  .content::-webkit-scrollbar-thumb { background: #ffffff20; border-radius: 2px; }
+
+  .header { text-align: center; margin-bottom: 24px; }
+  .header h1 { font-size: 28px; font-weight: 800; color: #ffffffcc; }
+  .header p { font-size: 13px; color: #ffffff60; margin-top: 4px; }
+
+  .status-card { background: #ffffff0d; border: 1px solid #ffffff15; border-radius: 16px; padding: 20px; margin-bottom: 16px; }
+  .status-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .status-row:last-child { margin-bottom: 0; }
+  .status-label { font-size: 13px; color: #ffffff80; }
+  .status-value { font-size: 13px; color: #ffffffcc; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot-green { background: #4caf50; box-shadow: 0 0 8px #4caf5060; }
+  .dot-red { background: #f44336; box-shadow: 0 0 8px #f4433660; }
+
+  .toggle-card { background: #ffffff0d; border: 1px solid #ffffff15; border-radius: 16px; padding: 16px 20px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+  .toggle-label { font-size: 14px; font-weight: 600; color: #ffffffcc; }
+  .toggle-label small { display: block; font-weight: 400; font-size: 11px; color: #ffffff60; margin-top: 2px; }
+  .toggle-btn { width: 52px; height: 28px; border-radius: 14px; border: none; cursor: pointer; position: relative; transition: background 0.2s; flex-shrink: 0; }
+  .toggle-on { background: #4caf50; }
+  .toggle-off { background: #ffffff30; }
+  .toggle-knob { width: 24px; height: 24px; border-radius: 50%; background: #fff; position: absolute; top: 2px; transition: left 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+  .toggle-on .toggle-knob { left: 26px; }
+  .toggle-off .toggle-knob { left: 2px; }
+
+  .section-title { font-size: 14px; font-weight: 700; color: #ffffff80; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+
+  .alert-item { background: #ffffff0d; border: 1px solid #ffffff10; border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+  .alert-icon { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .alert-icon-red { background: #f44336; }
+  .alert-icon-blue { background: #2196f3; }
+  .alert-icon-pink { background: #e91e63; }
+  .alert-info { flex: 1; }
+  .alert-title { font-size: 15px; font-weight: 600; color: #ffffffcc; }
+  .alert-time { font-size: 12px; color: #ffffff60; margin-top: 2px; }
+  .alert-empty { text-align: center; color: #ffffff40; font-size: 13px; padding: 24px 0; }
+
+  .btn-logout { width: 100%; padding: 14px; border-radius: 12px; border: 1px solid #ffffff20; background: transparent; color: #ffffff80; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 12px; transition: background 0.2s; }
+  .btn-logout:hover { background: #ffffff0a; }
+
+  .footer { padding: 12px 20px 20px; }
+  .footer span { font-size: 11px; color: #ffffff30; text-align: center; display: block; }
+
+  /* Alert overlay mock */
+  .alert-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #d32f2f; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; }
+  .alert-overlay.hidden { display: none; }
+  .alert-overlay h2 { font-size: 42px; font-weight: 800; color: #fff; text-align: center; }
+  .alert-overlay p { font-size: 20px; color: #ffffffcc; margin-top: 12px; text-align: center; }
+  .alert-ack { margin-top: 30px; padding: 12px 40px; border-radius: 8px; border: 1px solid #ffffff40; background: #ffffff20; color: #fff; font-size: 18px; font-weight: 600; cursor: pointer; }
+  .btn-dismiss-alert { position: absolute; top: 20px; right: 20px; background: none; border: none; color: #ffffff80; font-size: 14px; cursor: pointer; padding: 8px; }
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="status-bar">
+    <span>9:41</span>
+    <span>🔋 87%</span>
+  </div>
+
+  <!-- Dashboard (default) -->
+  <div id="dashboard" class="content">
+    <div class="header">
+      <h1>AlertFlow</h1>
+      <p>Monitoring Dashboard</p>
+    </div>
+
+    <div class="status-card">
+      <div class="status-row">
+        <span class="status-label"><span class="dot dot-green"></span>Connection</span>
+        <span class="status-value" style="color:#4caf50">Connected</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Device ID</span>
+        <span class="status-value" style="font-family:monospace;font-size:12px">a1b2c3d4e5f6</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Backend</span>
+        <span class="status-value" style="font-size:12px">192.168.8.144:3000</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Signed in as</span>
+        <span class="status-value">admin</span>
+      </div>
+    </div>
+
+    <div class="toggle-card">
+      <div>
+        <div class="toggle-label">⚡ Monitoring <small>Listening for alerts in background</small></div>
+      </div>
+      <button class="toggle-btn toggle-on" onclick="toggleMonitor(this)"><div class="toggle-knob"></div></button>
+    </div>
+
+    <div class="section-title">Recent Alerts</div>
+
+    <div id="alert-list">
+      <div class="alert-item">
+        <div class="alert-icon alert-icon-red"></div>
+        <div class="alert-info">
+          <div class="alert-title">Code Blue in ICU</div>
+          <div class="alert-time">10 minutes ago</div>
+        </div>
+      </div>
+      <div class="alert-item">
+        <div class="alert-icon alert-icon-pink"></div>
+        <div class="alert-info">
+          <div class="alert-title">Code Pink in Ward A</div>
+          <div class="alert-time">1 hour ago</div>
+        </div>
+      </div>
+      <div class="alert-item">
+        <div class="alert-icon alert-icon-blue"></div>
+        <div class="alert-info">
+          <div class="alert-title">Code Red in Emergency Room</div>
+          <div class="alert-time">3 hours ago</div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn-logout" onclick="document.getElementById('dashboard').classList.add('hidden');document.getElementById('login-screen').classList.remove('hidden')">Logout</button>
+  </div>
+
+  <!-- Alert overlay -->
+  <div id="alert-overlay" class="alert-overlay hidden">
+    <button class="btn-dismiss-alert" onclick="dismissAlert()">✕ Dismiss</button>
+    <h2>Code Blue in ICU</h2>
+    <p>Cardiac arrest — Emergency response team dispatched</p>
+    <button class="alert-ack" onclick="dismissAlert()">Acknowledge</button>
+  </div>
+
+  <div class="footer"><span>AlertFlow v1.0.0</span></div>
+</div>
+
+<script>
+  function toggleMonitor(btn) {
+    const isOn = btn.classList.contains('toggle-on');
+    btn.classList.toggle('toggle-on');
+    btn.classList.toggle('toggle-off');
+    const label = btn.closest('.toggle-card').querySelector('.toggle-label');
+    if (isOn) {
+      label.innerHTML = '⚡ Monitoring <small>Tap to start listening</small>';
+    } else {
+      label.innerHTML = '⚡ Monitoring <small>Listening for alerts in background</small>';
+    }
+  }
+
+  function showAlert() {
+    document.getElementById('alert-overlay').classList.remove('hidden');
+    document.getElementById('dashboard').style.display = 'none';
+  }
+
+  function dismissAlert() {
+    document.getElementById('alert-overlay').classList.add('hidden');
+    document.getElementById('dashboard').style.display = 'flex';
+  }
+
+  // Simulate an alert after 3 seconds for demo
+  setTimeout(showAlert, 3000);
+</script>
+</body>
+</html>

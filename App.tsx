@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions,
-  Animated, Platform, ScrollView, Alert,
+  Animated, Platform, ScrollView, Alert, AppState,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getLocalIp, getApiBase } from './src/services/config';
+import { startBackgroundTask, stopBackgroundTask, isTaskRunning, checkPendingAlert } from './src/services/backgroundService';
 
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
@@ -19,7 +21,14 @@ type AlertData = {
   codeColor?: string;
   message?: string;
   codeLocation?: string;
+  incidentLocation?: string;
+  locationName?: string;
   voiceEnabled?: boolean;
+  voiceText?: string;
+  voiceRate?: number;
+  voicePitch?: number;
+  voiceVolume?: number;
+  voiceGender?: string;
 };
 
 type SurveyData = {
@@ -89,7 +98,7 @@ function luminance(hex: string): number {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'idle'>('loading');
+  const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -101,31 +110,42 @@ export default function App() {
   const [clock, setClock] = useState(new Date());
   const [status, setStatus] = useState('Starting...');
   const [mode, setMode] = useState<'guest' | 'user' | null>(null);
+  const [monitoring, setMonitoring] = useState(false);
+  const [alertHistory, setAlertHistory] = useState<AlertData[]>([]);
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
   const localIp = useRef('0.0.0.0');
   const apiBaseRef = useRef('http://192.168.1.100:3000');
   const tokenRef = useRef<string | null>(null);
+  const appStateRef = useRef(AppState.currentState);
 
   const showAlert = useCallback((data: AlertData) => {
     setAlert(data); setSurveyData(null); setNewsData(null); setAnswers({}); setSurveySubmitted(false);
     setScreen('alert');
+    setAlertHistory((prev) => [data, ...prev].slice(0, 20));
+    if (data.voiceEnabled !== false) {
+      const location = data.incidentLocation || data.codeLocation || data.locationName || '';
+      const text = data.voiceText || [data.label || 'Alert', location ? `in ${location}` : '', data.message].filter(Boolean).join('. ');
+      Speech.stop();
+      Speech.speak(text, { language: 'en', rate: data.voiceRate || 1.0, pitch: data.voicePitch || 1.0, volume: ((data.voiceVolume ?? 80) / 100) });
+    }
     Animated.sequence([Animated.timing(pulse, { toValue: 1.03, duration: 300, useNativeDriver: true }), Animated.timing(pulse, { toValue: 1, duration: 300, useNativeDriver: true })]).start();
-    setTimeout(() => { setAlert(null); setScreen('idle'); }, ALERT_DISPLAY_MS);
+    setTimeout(() => { setAlert(null); setScreen('dashboard'); }, ALERT_DISPLAY_MS);
   }, []);
 
   const showSurvey = useCallback((data: SurveyData) => {
     setSurveyData(data); setAlert(null); setNewsData(null); setAnswers({}); setSurveySubmitted(false); setScreen('survey');
+    setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('dashboard'); }, 300000);
   }, []);
 
   const showNews = useCallback((data: NewsData) => {
     setNewsData(data); setAlert(null); setSurveyData(null); setAnswers({}); setSurveySubmitted(false); setScreen('news');
-    setTimeout(() => { setNewsData(null); setScreen('idle'); }, (data.durationSec || 10) * 1000);
+    setTimeout(() => { setNewsData(null); setScreen('dashboard'); }, (data.durationSec || 10) * 1000);
   }, []);
 
   const removeNews = useCallback((id: string) => {
     setNewsData((prev) => prev?.id === id ? null : prev);
-    setScreen('idle');
+    setScreen('dashboard');
   }, []);
 
   useEffect(() => {
@@ -149,7 +169,7 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           tokenRef.current = data.token;
-          if (mounted) { setMode('guest'); setScreen('idle'); }
+          if (mounted) { setMode('guest'); setScreen('dashboard'); }
         } else {
           if (mounted) setScreen('login');
         }
@@ -185,13 +205,50 @@ export default function App() {
   }, [showAlert, showSurvey, showNews, removeNews]);
 
   useEffect(() => {
-    if (screen === 'idle' || screen === 'alert') {
+    if (screen === 'dashboard' || screen === 'alert') {
       doHeartbeat();
       const hb = setInterval(doHeartbeat, HBEAT_MS);
       const clk = setInterval(() => setClock(new Date()), 1000);
       return () => { clearInterval(hb); clearInterval(clk); };
     }
   }, [screen, doHeartbeat]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
+        const pending = await checkPendingAlert();
+        if (pending && screen !== 'alert') {
+          showAlert(pending);
+        }
+      }
+      appStateRef.current = nextState;
+    });
+    return () => sub.remove();
+  }, [screen, showAlert]);
+
+  const handleToggleMonitoring = useCallback(async () => {
+    if (monitoring) {
+      await stopBackgroundTask();
+      setMonitoring(false);
+    } else {
+      await startBackgroundTask({
+        apiBase: apiBaseRef.current,
+        deviceId: deviceId.current,
+        token: tokenRef.current || undefined,
+      });
+      setMonitoring(true);
+    }
+  }, [monitoring]);
+
+  const handleLogout = useCallback(async () => {
+    await stopBackgroundTask();
+    setMonitoring(false);
+    tokenRef.current = null;
+    setMode(null);
+    setUsername('');
+    setPassword('');
+    setScreen('login');
+  }, []);
 
   const handleGuestLogin = useCallback(async () => {
     setLoginError('');
@@ -203,7 +260,7 @@ export default function App() {
       const data = await res.json();
       tokenRef.current = data.token;
       setMode('guest');
-      setScreen('idle');
+      setScreen('dashboard');
     } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
   }, []);
 
@@ -220,7 +277,7 @@ export default function App() {
       const data = await res.json();
       tokenRef.current = data.accessToken;
       setMode('user');
-      setScreen('idle');
+      setScreen('dashboard');
     } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
   }, [username, password]);
 
@@ -234,7 +291,7 @@ export default function App() {
         body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: mode === 'user' ? username : 'guest' }),
       });
     } catch {}
-    setAlert(null); setScreen('idle');
+    setAlert(null); setScreen('dashboard');
   }, [alert, mode, username]);
 
   const updateAnswer = useCallback((questionId: string, value: string | string[] | number) => {
@@ -262,7 +319,7 @@ export default function App() {
     } catch {}
     setSurveySubmitted(true);
     Alert.alert('Submitted', 'Survey response submitted.');
-    setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('idle'); }, 1500);
+    setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('dashboard'); }, 1500);
   }, [surveyData, answers, surveySubmitted]);
 
   const renderQuestion = (q: SurveyQuestion, idx: number) => {
@@ -341,14 +398,14 @@ export default function App() {
     const bg = alert.color || '#d32f2f';
     const light = luminance(bg) > 0.6;
     const tc = light ? '#000' : '#fff';
+    const location = alert.incidentLocation || alert.codeLocation || alert.locationName || '';
+    const title = [alert.label || 'ALERT', location ? `in ${location}` : ''].join(' ');
     return (
       <View style={[styles.container, { backgroundColor: bg }]}>
         <StatusBar hidden />
         <Animated.View style={[styles.overlay, { transform: [{ scale: pulse }] }]}>
-          <Text style={[styles.codeLabel, { color: tc }]}>{alert.label || 'ALERT'}</Text>
-          <Text style={[styles.codeName, { color: tc }]}>{alert.code || ''}</Text>
-          {alert.codeLocation && <Text style={[styles.location, { color: tc }]}>{alert.codeLocation}</Text>}
-          {alert.message && <Text style={[styles.message, { color: tc }]}>{alert.message}</Text>}
+          <Text style={[styles.codeLabel, { color: tc }]}>{title}</Text>
+          {alert.message ? <Text style={[styles.message, { color: tc }]}>{alert.message}</Text> : null}
           <TouchableOpacity style={[styles.ackBtn, { backgroundColor: light ? '#00000030' : '#ffffff30' }]} onPress={handleAcknowledge}><Text style={[styles.ackBtnText, { color: tc }]}>Acknowledge</Text></TouchableOpacity>
         </Animated.View>
       </View>
@@ -404,14 +461,81 @@ export default function App() {
     );
   }
 
+  if (screen === 'dashboard') {
+    const connected = mode !== null;
+    const recentAlerts = alertHistory.slice(0, 10);
+    return (
+      <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 50 }]}>
+        <StatusBar hidden />
+        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 20 }}>
+          <Text style={[styles.codeLabel, { color: '#ffffffcc', fontSize: 28, marginBottom: 4 }]}>AlertFlow</Text>
+          <Text style={{ color: '#ffffff60', fontSize: 13, marginBottom: 24 }}>Monitoring Dashboard</Text>
+
+          <View style={styles.card}>
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}><Text style={{ color: connected ? '#4caf50' : '#f44336', fontSize: 16 }}>●</Text> Connection</Text>
+              <Text style={[styles.rowValue, { color: connected ? '#4caf50' : '#f44336' }]}>{connected ? 'Connected' : 'Disconnected'}</Text>
+            </View>
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>Device ID</Text>
+              <Text style={[styles.rowValue, { fontFamily: 'monospace', fontSize: 11 }]}>{deviceId.current}</Text>
+            </View>
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>Backend</Text>
+              <Text style={[styles.rowValue, { fontSize: 12 }]}>{apiBaseRef.current.replace('http://', '')}</Text>
+            </View>
+            <View style={styles.row}>
+              <Text style={styles.rowLabel}>Signed in as</Text>
+              <Text style={styles.rowValue}>{mode === 'user' ? username : 'Guest'}</Text>
+            </View>
+          </View>
+
+          <View style={[styles.card, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 16 }]}>
+            <View>
+              <Text style={{ color: '#ffffffcc', fontSize: 14, fontWeight: '600' }}>⚡ Monitoring</Text>
+              <Text style={{ color: '#ffffff60', fontSize: 11, marginTop: 2 }}>{monitoring ? 'Listening for alerts in background' : 'Tap to start listening'}</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.toggleBtn, { backgroundColor: monitoring ? '#4caf50' : '#ffffff30' }]}
+              onPress={handleToggleMonitoring}
+            >
+              <View style={[styles.toggleKnob, { left: monitoring ? 26 : 2 }]} />
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.sectionTitle}>Recent Alerts</Text>
+
+          {recentAlerts.length === 0 ? (
+            <Text style={{ color: '#ffffff40', fontSize: 13, textAlign: 'center', paddingVertical: 24 }}>No alerts received yet</Text>
+          ) : (
+            recentAlerts.map((item, idx) => {
+              const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
+              const title = [item.label || 'Alert', loc ? `in ${loc}` : ''].join(' ');
+              return (
+                <View key={idx} style={styles.alertItem}>
+                  <View style={[styles.alertDot, { backgroundColor: item.color || '#f44336' }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.alertTitle}>{title}</Text>
+                    {item.message ? <Text style={styles.alertMeta}>{item.message}</Text> : null}
+                  </View>
+                </View>
+              );
+            })
+          )}
+
+          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+            <Text style={styles.logoutBtnText}>Logout</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
       <StatusBar hidden />
       <Text style={[styles.clock, { color: '#ffffff80' }]}>{clock.toLocaleTimeString()}</Text>
       <Text style={[styles.status, { color: '#ffffff40', marginTop: 10 }]}>Connected · {mode === 'user' ? username : 'Guest'}</Text>
-      <TouchableOpacity onPress={() => setScreen('login')} style={{ marginTop: 20, padding: 10 }}>
-        <Text style={{ color: '#ffffff50', fontSize: 14 }}>Tap to sign in</Text>
-      </TouchableOpacity>
     </View>
   );
 }
@@ -450,4 +574,17 @@ const styles = StyleSheet.create({
   newsTitle: { fontSize: 24, fontWeight: '700', marginBottom: 12, textAlign: 'center' },
   newsBody: { fontSize: 16, lineHeight: 24, textAlign: 'center' },
   newsTimer: { fontSize: 12, textAlign: 'center', marginTop: 16 },
+  card: { backgroundColor: '#ffffff0d', borderWidth: 1, borderColor: '#ffffff15', borderRadius: 16, padding: 20, marginBottom: 16 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  rowLabel: { color: '#ffffff80', fontSize: 13 },
+  rowValue: { color: '#ffffffcc', fontSize: 13, fontWeight: '600' },
+  toggleBtn: { width: 52, height: 28, borderRadius: 14, justifyContent: 'center', position: 'relative' },
+  toggleKnob: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#fff', position: 'absolute', top: 2, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 3, elevation: 3 },
+  sectionTitle: { color: '#ffffff80', fontSize: 14, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
+  alertItem: { backgroundColor: '#ffffff0d', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, padding: 14, marginBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
+  alertTitle: { color: '#ffffffcc', fontSize: 15, fontWeight: '600' },
+  alertMeta: { color: '#ffffff60', fontSize: 12, marginTop: 2 },
+  logoutBtn: { width: '100%', padding: 14, borderRadius: 12, borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', marginTop: 12 },
+  logoutBtnText: { color: '#ffffff80', fontSize: 15, fontWeight: '600' },
 });
