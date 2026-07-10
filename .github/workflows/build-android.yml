@@ -16,13 +16,9 @@ jobs:
         run: npm ci
       - name: Prebuild (generate android project)
         run: npx expo prebuild --clean
-      - name: Bundle JS and assets
-        run: |
-          mkdir -p android/app/src/main/assets
-          npx react-native bundle --platform android --entry-file index.ts --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res --dev false
-      - name: Build debug APK
-        run: cd android && ./gradlew assembleDebug
+      - name: Build release APK (bundles JS automatically)
+        run: cd android && ./gradlew assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: alertflow-mobile-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/release/*.apk
