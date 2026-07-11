@@ -5,8 +5,10 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
+import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import logoPng from './assets/alertflow-icon.png';
+import iconPng from './assets/alertflow-icon.png';
+import logoPng from './assets/alertflow-logo.png';
 import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
 
 const WS_PORT = 3004;
@@ -140,6 +142,22 @@ export default function App() {
   const apiBaseRef = useRef('http://192.168.1.100:3000');
   const tokenRef = useRef<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
+  const newsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const AUTH_TOKEN_KEY = 'authToken';
+  const AUTH_USERNAME_KEY = 'authUsername';
+  const AUTH_SAVED_AT_KEY = 'authSavedAt';
+
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      }),
+    });
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -153,6 +171,26 @@ export default function App() {
         setServerInput(apiBaseRef.current);
         setStatus(`Backend: ${apiBaseRef.current}`);
       } catch (e: any) { setStatus(`Discovery: ${e.message}`); }
+
+      try {
+        const [savedToken, savedUsername, savedAtStr] = await Promise.all([
+          AsyncStorage.getItem(AUTH_TOKEN_KEY),
+          AsyncStorage.getItem(AUTH_USERNAME_KEY),
+          AsyncStorage.getItem(AUTH_SAVED_AT_KEY),
+        ]);
+        if (savedToken && savedUsername) {
+          const savedAt = savedAtStr ? parseInt(savedAtStr, 10) : 0;
+          const maxAge = 30 * 24 * 60 * 60 * 1000;
+          if (Date.now() - savedAt < maxAge) {
+            tokenRef.current = savedToken;
+            setUsername(savedUsername);
+            if (!mounted) return;
+            setScreen('dashboard');
+            return;
+          }
+        }
+      } catch {}
+
       setScreen('login');
     })();
     return () => { mounted = false; };
@@ -171,9 +209,23 @@ export default function App() {
   }, []);
 
   const scheduleNotif = useCallback(async (type: string, title: string, body: string, extra: Record<string, string>) => {
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: { title, body, data: extra, sound: true },
+        trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 1 },
+      });
+    } catch {}
+  }, []);
+
+  const cancelNewsTimer = useCallback(() => {
+    if (newsTimerRef.current) {
+      clearTimeout(newsTimerRef.current);
+      newsTimerRef.current = null;
+    }
   }, []);
 
   const showAlert = useCallback((data: AlertData) => {
+    cancelNewsTimer();
     setAlert(data);
     setSurveyData(null);
     setNewsData(null);
@@ -201,6 +253,7 @@ export default function App() {
   }, [playAlertSound, speakRepeated]);
 
   const showSurveyScreen = useCallback((data: SurveyData) => {
+    cancelNewsTimer();
     setSurveyData(data);
     setAlert(null);
     setNewsData(null);
@@ -214,6 +267,7 @@ export default function App() {
   }, []);
 
   const showNewsScreen = useCallback((data: NewsData) => {
+    cancelNewsTimer();
     setNewsData(data);
     setAlert(null);
     setSurveyData(null);
@@ -224,7 +278,7 @@ export default function App() {
       if (prev.find((n) => n.id === data.id)) return prev;
       return [...prev, data];
     });
-    setTimeout(() => {
+    newsTimerRef.current = setTimeout(() => {
       setNewsData((prev) => prev?.id === data.id ? null : prev);
       setScreen('dashboard');
     }, (data.durationSec || 10) * 1000);
@@ -321,6 +375,11 @@ export default function App() {
       if (!res.ok) { setLoginError(`Login failed (${res.status})`); return; }
       const data = await res.json();
       tokenRef.current = data.accessToken;
+      await AsyncStorage.multiSet([
+        [AUTH_TOKEN_KEY, data.accessToken],
+        [AUTH_USERNAME_KEY, username.trim()],
+        [AUTH_SAVED_AT_KEY, String(Date.now())],
+      ]);
       setScreen('dashboard');
     } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
   }, [username, password]);
@@ -329,6 +388,7 @@ export default function App() {
     tokenRef.current = null;
     setUsername('');
     setPassword('');
+    await AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
     setScreen('login');
   }, []);
 
@@ -442,7 +502,7 @@ export default function App() {
   if (screen === 'loading') {
     return (
       <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
-        <Image source={logoPng} style={{ width: 72, height: 72, borderRadius: 16, marginBottom: 16 }} />
+        <Image source={iconPng} style={{ width: 72, height: 72, borderRadius: 16, marginBottom: 16 }} />
         <Text style={[styles.brandTitle, { color: '#ffffffcc' }]}>AlertFlow</Text>
         <Text style={[styles.status, { color: '#ffffff60', marginTop: 20 }]}>{status}</Text>
       </View>
@@ -603,13 +663,7 @@ export default function App() {
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
         <View style={styles.topBar}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <Image source={logoPng} style={styles.topLogo} resizeMode="contain" />
-            <View>
-              <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }}>AlertFlow</Text>
-              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center</Text>
-            </View>
-          </View>
+          <Image source={logoPng} style={styles.topLogo} resizeMode="contain" />
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
             <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>Live</Text></View>
             <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>MO</Text></TouchableOpacity>
@@ -717,7 +771,7 @@ const styles = StyleSheet.create({
   brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
   brandSub: { fontSize: 12, color: '#ffffff60', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
   topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
-  topLogo: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#0c1428', borderWidth: 1, borderColor: '#ffffff10' },
+  topLogo: { height: 32, width: 133 },
   livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
   liveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22c55e' },
   liveText: { color: '#86efac', fontSize: 11, fontWeight: '600' },
