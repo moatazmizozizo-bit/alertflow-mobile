@@ -21,10 +21,7 @@
       "permissions": [
         "INTERNET",
         "ACCESS_WIFI_STATE",
-        "ACCESS_NETWORK_STATE",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_DATA_SYNC",
-        "POST_NOTIFICATIONS"
+        "ACCESS_NETWORK_STATE"
       ]
     },
     "web": {

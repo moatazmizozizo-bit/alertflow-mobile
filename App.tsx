@@ -7,7 +7,6 @@ import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getLocalIp, getApiBase } from './src/services/config';
-import { startBackgroundTask, stopBackgroundTask, isTaskRunning, checkPendingAlert } from './src/services/backgroundService';
 
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
@@ -97,6 +96,12 @@ function luminance(hex: string): number {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
+function displayLabel(data: AlertData): string {
+  if (data.label) return data.label;
+  if (data.code) return data.code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return 'ALERT';
+}
+
 export default function App() {
   const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
   const [username, setUsername] = useState('');
@@ -110,7 +115,6 @@ export default function App() {
   const [clock, setClock] = useState(new Date());
   const [status, setStatus] = useState('Starting...');
   const [mode, setMode] = useState<'guest' | 'user' | null>(null);
-  const [monitoring, setMonitoring] = useState(false);
   const [alertHistory, setAlertHistory] = useState<AlertData[]>([]);
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
@@ -125,7 +129,7 @@ export default function App() {
     setAlertHistory((prev) => [data, ...prev].slice(0, 20));
     if (data.voiceEnabled !== false) {
       const location = data.incidentLocation || data.codeLocation || data.locationName || '';
-      const text = data.voiceText || [data.label || 'Alert', location ? `in ${location}` : '', data.message].filter(Boolean).join('. ');
+      const text = data.voiceText || [displayLabel(data), location ? `in ${location}` : '', data.message].filter(Boolean).join('. ');
       Speech.stop();
       Speech.speak(text, { language: 'en', rate: data.voiceRate || 1.0, pitch: data.voicePitch || 1.0, volume: ((data.voiceVolume ?? 80) / 100) });
     }
@@ -216,33 +220,14 @@ export default function App() {
   useEffect(() => {
     const sub = AppState.addEventListener('change', async (nextState) => {
       if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
-        const pending = await checkPendingAlert();
-        if (pending && screen !== 'alert') {
-          showAlert(pending);
-        }
+        doHeartbeat();
       }
       appStateRef.current = nextState;
     });
     return () => sub.remove();
-  }, [screen, showAlert]);
-
-  const handleToggleMonitoring = useCallback(async () => {
-    if (monitoring) {
-      await stopBackgroundTask();
-      setMonitoring(false);
-    } else {
-      await startBackgroundTask({
-        apiBase: apiBaseRef.current,
-        deviceId: deviceId.current,
-        token: tokenRef.current || undefined,
-      });
-      setMonitoring(true);
-    }
-  }, [monitoring]);
+  }, [screen, showAlert, doHeartbeat]);
 
   const handleLogout = useCallback(async () => {
-    await stopBackgroundTask();
-    setMonitoring(false);
     tokenRef.current = null;
     setMode(null);
     setUsername('');
@@ -399,7 +384,7 @@ export default function App() {
     const light = luminance(bg) > 0.6;
     const tc = light ? '#000' : '#fff';
     const location = alert.incidentLocation || alert.codeLocation || alert.locationName || '';
-    const title = [alert.label || 'ALERT', location ? `in ${location}` : ''].join(' ');
+    const title = [displayLabel(alert), location ? `in ${location}` : ''].join(' ');
     return (
       <View style={[styles.container, { backgroundColor: bg }]}>
         <StatusBar hidden />
@@ -490,17 +475,9 @@ export default function App() {
             </View>
           </View>
 
-          <View style={[styles.card, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 16 }]}>
-            <View>
-              <Text style={{ color: '#ffffffcc', fontSize: 14, fontWeight: '600' }}>⚡ Monitoring</Text>
-              <Text style={{ color: '#ffffff60', fontSize: 11, marginTop: 2 }}>{monitoring ? 'Listening for alerts in background' : 'Tap to start listening'}</Text>
-            </View>
-            <TouchableOpacity
-              style={[styles.toggleBtn, { backgroundColor: monitoring ? '#4caf50' : '#ffffff30' }]}
-              onPress={handleToggleMonitoring}
-            >
-              <View style={[styles.toggleKnob, { left: monitoring ? 26 : 2 }]} />
-            </TouchableOpacity>
+          <View style={[styles.card, { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 }]}>
+            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#4caf50', marginRight: 8 }} />
+            <Text style={{ color: '#ffffffaa', fontSize: 13 }}>Connected — listening for alerts</Text>
           </View>
 
           <Text style={styles.sectionTitle}>Recent Alerts</Text>
@@ -510,7 +487,7 @@ export default function App() {
           ) : (
             recentAlerts.map((item, idx) => {
               const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
-              const title = [item.label || 'Alert', loc ? `in ${loc}` : ''].join(' ');
+              const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
               return (
                 <View key={idx} style={styles.alertItem}>
                   <View style={[styles.alertDot, { backgroundColor: item.color || '#f44336' }]} />
@@ -578,8 +555,6 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   rowLabel: { color: '#ffffff80', fontSize: 13 },
   rowValue: { color: '#ffffffcc', fontSize: 13, fontWeight: '600' },
-  toggleBtn: { width: 52, height: 28, borderRadius: 14, justifyContent: 'center', position: 'relative' },
-  toggleKnob: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#fff', position: 'absolute', top: 2, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 3, elevation: 3 },
   sectionTitle: { color: '#ffffff80', fontSize: 14, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
   alertItem: { backgroundColor: '#ffffff0d', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, padding: 14, marginBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 12 },
   alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
