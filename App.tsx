@@ -31,6 +31,9 @@ type AlertData = {
   voiceGender?: string;
   codeDoc?: string;
   teamActions?: { title: string; description: string }[];
+  isClear?: boolean;
+  createdAt?: string;
+  codeName?: string;
 };
 
 type SurveyData = {
@@ -253,12 +256,16 @@ export default function App() {
         if (data.commands && Array.isArray(data.commands)) {
           const isBg = appStateRef.current === 'background' || appStateRef.current === 'inactive';
           for (const cmd of data.commands) {
-            if (cmd.type === 'alert' && cmd.data) {
+            const isAlertType = cmd.type === 'alert' || cmd.type === 'alert-clear';
+            const inner = isAlertType && cmd.data?.type === cmd.type ? cmd.data.data : cmd.data;
+            if (cmd.type === 'alert' && inner) {
               if (isBg) {
-                scheduleNotif('alert', `⚠️ ${displayLabel(cmd.data)}`, cmd.data.message || 'Alert received', { alertData: JSON.stringify(cmd.data) });
+                scheduleNotif('alert', `⚠️ ${displayLabel(inner)}`, inner.message || 'Alert received', { alertData: JSON.stringify(inner) });
               } else {
-                showAlert(cmd.data);
+                showAlert(inner);
               }
+            } else if (cmd.type === 'alert-clear' && inner) {
+              showAlert({ ...inner, isClear: true });
             } else if (cmd.type === 'survey-campaign' && cmd.data) {
               if (isBg) {
                 scheduleNotif('survey', '📋 New Survey', cmd.data.survey?.title || 'Survey available', { surveyData: JSON.stringify(cmd.data) });
@@ -467,17 +474,40 @@ export default function App() {
 
   // === ALERT FULLSCREEN ===
   if (screen === 'alert' && alert) {
-    const bg = alert.color || codeColor(alert.code);
+    const bg = alert.color || codeColor(alert.code) || '#d32f2f';
     const light = luminance(bg) > 0.6;
     const tc = light ? '#000' : '#fff';
     const location = alert.incidentLocation || alert.codeLocation || alert.locationName || '';
-    const title = [displayLabel(alert), location ? `in ${location}` : ''].join(' ');
+    const codeName = alert.codeName || alert.code || '';
     return (
       <View style={[styles.container, { backgroundColor: bg, paddingTop: 50 }]}>
         <StatusBar hidden />
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24 }}>
-          <Text style={[styles.alertLabel, { color: tc }]}>{title}</Text>
+          {codeName ? (
+            <View style={{ alignSelf: 'center', paddingHorizontal: 20, paddingVertical: 7, borderRadius: 999, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 8 }}>
+              <Text style={{ color: tc, fontSize: 13, fontWeight: '700', letterSpacing: 2, textTransform: 'uppercase' }}>{codeName}</Text>
+            </View>
+          ) : null}
+
+          <Text style={[styles.alertLabel, { color: tc, marginBottom: 6 }]}>{displayLabel(alert)}</Text>
+
+          {location ? (
+            <Text style={{ color: tc + 'cc', fontSize: 16, fontWeight: '500', textAlign: 'center', marginBottom: 8 }}>📍 {location}</Text>
+          ) : null}
+
           {alert.message ? <Text style={[styles.alertMsg, { color: tc + 'dd' }]}>{alert.message}</Text> : null}
+
+          {alert.createdAt ? (
+            <Text style={{ color: tc + '88', fontSize: 12, textAlign: 'center', marginBottom: 12 }}>
+              {new Date(alert.createdAt).toLocaleString()}
+            </Text>
+          ) : null}
+
+          {alert.isClear ? (
+            <View style={{ alignSelf: 'center', paddingHorizontal: 24, paddingVertical: 8, borderRadius: 8, backgroundColor: '#22c55e40', marginVertical: 8 }}>
+              <Text style={{ color: '#22c55e', fontSize: 16, fontWeight: '700' }}>✓ CODE CLEAR</Text>
+            </View>
+          ) : null}
 
           {alert.codeDoc ? (
             <View style={[styles.codeDocBlock, { backgroundColor: light ? '#00000010' : '#ffffff10' }]}>
@@ -504,17 +534,15 @@ export default function App() {
           ) : null}
 
           <View style={[styles.alertBtnRow, { marginTop: 24 }]}>
-            <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000020' : '#ffffff20' }]} onPress={handleAcknowledge}>
-              <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Acknowledge</Text>
-            </TouchableOpacity>
-            {alert.teamActions && alert.teamActions.length > 0 ? (
-              <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000015' : '#ffffff15' }]} onPress={() => Alert.alert('Team Actions', alert.teamActions!.map((a, i) => `${i + 1}. ${a.title}${a.description ? ': ' + a.description : ''}`).join('\n\n'))}>
-                <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>View Actions</Text>
+            {!alert.isClear ? (
+              <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000020' : '#ffffff20' }]} onPress={handleAcknowledge}>
+                <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Acknowledge</Text>
               </TouchableOpacity>
             ) : null}
+            <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000015' : '#ffffff15' }]} onPress={() => { setAlert(null); setScreen('dashboard'); }}>
+              <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Dismiss</Text>
+            </TouchableOpacity>
           </View>
-
-          <Text style={[styles.alertInfo, { color: tc + '99' }]}>🔊 Voice repeating · 🔔 Beep 3x</Text>
         </ScrollView>
       </View>
     );
@@ -543,17 +571,27 @@ export default function App() {
   // === NEWS FULLSCREEN ===
   if (screen === 'news' && newsData) {
     const bg = newsData.backgroundColor || '#1a1a2e';
-    const tc = newsData.textColor || '#fff';
+    const light = luminance(bg) > 0.6;
+    const tc = newsData.textColor || (light ? '#000' : '#fff');
     return (
-      <View style={[styles.container, { backgroundColor: bg }]}>
+      <View style={{ flex: 1, backgroundColor: bg, paddingTop: 50, paddingHorizontal: 24, paddingBottom: 20 }}>
         <StatusBar hidden />
-        <View style={styles.newsCard}>
-          <Text style={[styles.newsTitle, { color: tc }]}>{newsData.title}</Text>
-          {newsData.body ? <Text style={[styles.newsBody, { color: tc + 'cc' }]}>{newsData.body}</Text> : null}
-          <TouchableOpacity style={{ marginTop: 20, alignSelf: 'center', padding: 10 }} onPress={() => { setNewsData(null); setScreen('dashboard'); }}>
-            <Text style={{ color: tc + '80', fontSize: 14, fontWeight: '600' }}>Dismiss</Text>
-          </TouchableOpacity>
+        <View style={{ flex: 1 }}>
+          <View style={{ alignSelf: 'flex-start', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 6, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 14 }}>
+            <Text style={{ color: light ? '#000000aa' : '#ffffffaa', fontSize: 12, fontWeight: '600' }}>
+              {newsData.type === 'card' ? 'AWARENESS' : 'UPDATE'}
+            </Text>
+          </View>
+          <Text style={{ color: tc, fontSize: 28, fontWeight: '800', marginBottom: 16, lineHeight: 34 }}>{newsData.title}</Text>
+          {newsData.body ? (
+            <ScrollView style={{ flex: 1 }}>
+              <Text style={{ color: light ? '#000000cc' : '#ffffffcc', fontSize: 17, lineHeight: 26 }}>{newsData.body}</Text>
+            </ScrollView>
+          ) : null}
         </View>
+        <TouchableOpacity onPress={() => { setNewsData(null); setScreen('dashboard'); }} style={{ alignSelf: 'center', paddingVertical: 14, paddingHorizontal: 48, borderRadius: 10, borderWidth: 1, borderColor: light ? '#00000030' : '#ffffff30', marginBottom: 10 }}>
+          <Text style={{ color: light ? '#000000aa' : '#ffffffaa', fontSize: 16, fontWeight: '600' }}>Dismiss</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -705,11 +743,8 @@ const styles = StyleSheet.create({
   tnumText: { fontSize: 13, fontWeight: '700' },
   alertBtnRow: { flexDirection: 'row', gap: 12 },
   alertBtn: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
-  alertInfo: { fontSize: 11, textAlign: 'center', marginTop: 12, opacity: 0.6 },
   newsCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
   newsTag: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 2, borderRadius: 4, marginBottom: 8 },
-  newsTitle: { fontSize: 24, fontWeight: '700', marginBottom: 12, textAlign: 'center' },
-  newsBody: { fontSize: 16, lineHeight: 24, textAlign: 'center' },
   surveyCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
   fillBtn: { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 8, backgroundColor: '#3a7bd5', borderRadius: 6 },
   questionBlock: { marginBottom: 20 },
