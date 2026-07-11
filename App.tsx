@@ -1,16 +1,20 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions,
-  Animated, Platform, ScrollView, Alert, AppState,
+  Animated, Platform, ScrollView, Alert, AppState, Image,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
+import { Audio } from 'expo-av';
+import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import beepWav from './assets/beep.wav';
+import logoPng from './assets/alertflow-logo.png';
 import { getLocalIp, getApiBase } from './src/services/config';
 
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
-const ALERT_DISPLAY_MS = 10000;
+const ALERT_DISPLAY_MS = 30000;
 
 type AlertData = {
   id?: string;
@@ -28,6 +32,8 @@ type AlertData = {
   voicePitch?: number;
   voiceVolume?: number;
   voiceGender?: string;
+  codeDoc?: string;
+  teamActions?: { title: string; description: string }[];
 };
 
 type SurveyData = {
@@ -54,22 +60,40 @@ type SurveyQuestion = {
 };
 
 type NewsData = {
-  id: string;
-  title: string;
-  body: string | null;
-  priority: number;
-  startAt: string | null;
-  endAt: string | null;
-  isActive: boolean;
-  updatedAt: string;
-  type: 'strip' | 'card';
-  durationSec: number;
-  opacity: number;
-  backgroundColor: string | null;
-  textColor: string | null;
+  id: string; title: string; body: string | null; priority: number;
+  startAt: string | null; endAt: string | null; isActive: boolean;
+  updatedAt: string; type: 'strip' | 'card'; durationSec: number;
+  opacity: number; backgroundColor: string | null; textColor: string | null;
 };
 
 type AnswerMap = Record<string, string | string[] | number>;
+
+const CODE_COLORS: Record<string, string> = {
+  CODE_RED: '#d32f2f', CODE_BLUE: '#1565c0', CODE_YELLOW: '#fdd835',
+  CODE_ORANGE: '#ff8f00', CODE_GREEN: '#2e7d32', CODE_PURPLE: '#7b1fa2',
+  CODE_PINK: '#c2185b', CODE_WHITE: '#f5f5f5', CODE_BLACK: '#212121',
+  CODE_GRAY: '#616161', CODE_SILVER: '#9e9e9e', CODE_BROWN: '#5d4037',
+};
+
+function codeColor(code?: string): string {
+  if (!code) return '#d32f2f';
+  return CODE_COLORS[code] || '#d32f2f';
+}
+
+function displayLabel(data: AlertData): string {
+  if (data.label) return data.label;
+  if (data.code) return data.code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return 'ALERT';
+}
+
+function formatTime(d: Date): string {
+  const n = new Date();
+  const diff = Math.floor((n.getTime() - d.getTime()) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
 
 function getDeviceId(): string {
   const chars = 'abcdef0123456789';
@@ -79,10 +103,7 @@ function getDeviceId(): string {
 }
 
 async function loadDeviceId(): Promise<string> {
-  try {
-    const stored = await AsyncStorage.getItem('deviceId');
-    if (stored) return stored;
-  } catch {}
+  try { const stored = await AsyncStorage.getItem('deviceId'); if (stored) return stored; } catch {}
   const id = getDeviceId();
   try { await AsyncStorage.setItem('deviceId', id); } catch {}
   return id;
@@ -96,11 +117,9 @@ function luminance(hex: string): number {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
-function displayLabel(data: AlertData): string {
-  if (data.label) return data.label;
-  if (data.code) return data.code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-  return 'ALERT';
-}
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
+});
 
 export default function App() {
   const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
@@ -112,44 +131,51 @@ export default function App() {
   const [answers, setAnswers] = useState<AnswerMap>({});
   const [surveySubmitted, setSurveySubmitted] = useState(false);
   const [newsData, setNewsData] = useState<NewsData | null>(null);
+  const [newsList, setNewsList] = useState<NewsData[]>([]);
+  const [surveyList, setSurveyList] = useState<SurveyData[]>([]);
   const [clock, setClock] = useState(new Date());
   const [status, setStatus] = useState('Starting...');
-  const [mode, setMode] = useState<'guest' | 'user' | null>(null);
-  const [alertHistory, setAlertHistory] = useState<AlertData[]>([]);
+  const [activeTab, setActiveTab] = useState<'alerts' | 'news' | 'surveys'>('alerts');
+  const [alertHistory, setAlertHistory] = useState<(AlertData & { ts: Date })[]>([]);
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
   const localIp = useRef('0.0.0.0');
   const apiBaseRef = useRef('http://192.168.1.100:3000');
   const tokenRef = useRef<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
+  const beepSound = useRef<Audio.Sound | null>(null);
+  const notificationResp = useRef<Notifications.NotificationResponse | null>(null);
 
-  const showAlert = useCallback((data: AlertData) => {
-    setAlert(data); setSurveyData(null); setNewsData(null); setAnswers({}); setSurveySubmitted(false);
-    setScreen('alert');
-    setAlertHistory((prev) => [data, ...prev].slice(0, 20));
-    if (data.voiceEnabled !== false) {
-      const location = data.incidentLocation || data.codeLocation || data.locationName || '';
-      const text = data.voiceText || [displayLabel(data), location ? `in ${location}` : '', data.message].filter(Boolean).join('. ');
-      Speech.stop();
-      Speech.speak(text, { language: 'en', rate: data.voiceRate || 1.0, pitch: data.voicePitch || 1.0, volume: ((data.voiceVolume ?? 80) / 100) });
-    }
-    Animated.sequence([Animated.timing(pulse, { toValue: 1.03, duration: 300, useNativeDriver: true }), Animated.timing(pulse, { toValue: 1, duration: 300, useNativeDriver: true })]).start();
-    setTimeout(() => { setAlert(null); setScreen('dashboard'); }, ALERT_DISPLAY_MS);
+  useEffect(() => {
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true });
+    const load = async () => {
+      const { sound } = await Audio.Sound.createAsync(beepWav, { volume: 1 });
+      beepSound.current = sound;
+    };
+    load();
+    return () => { beepSound.current?.unloadAsync(); };
   }, []);
 
-  const showSurvey = useCallback((data: SurveyData) => {
-    setSurveyData(data); setAlert(null); setNewsData(null); setAnswers({}); setSurveySubmitted(false); setScreen('survey');
-    setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('dashboard'); }, 300000);
-  }, []);
-
-  const showNews = useCallback((data: NewsData) => {
-    setNewsData(data); setAlert(null); setSurveyData(null); setAnswers({}); setSurveySubmitted(false); setScreen('news');
-    setTimeout(() => { setNewsData(null); setScreen('dashboard'); }, (data.durationSec || 10) * 1000);
-  }, []);
-
-  const removeNews = useCallback((id: string) => {
-    setNewsData((prev) => prev?.id === id ? null : prev);
-    setScreen('dashboard');
+  useEffect(() => {
+    Notifications.requestPermissionsAsync();
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      notificationResp.current = response;
+      const data = response.notification.request.content.data;
+      if (data?.type === 'alert' && data?.alertData) {
+        const ad = JSON.parse(data.alertData as string) as AlertData;
+        setAlert(ad);
+        setScreen('alert');
+      } else if (data?.type === 'news' && data?.newsData) {
+        const nd = JSON.parse(data.newsData as string) as NewsData;
+        setNewsData(nd);
+        setScreen('news');
+      } else if (data?.type === 'survey' && data?.surveyData) {
+        const sd = JSON.parse(data.surveyData as string) as SurveyData;
+        setSurveyData(sd);
+        setScreen('survey');
+      }
+    });
+    return () => sub.remove();
   }, []);
 
   useEffect(() => {
@@ -158,30 +184,108 @@ export default function App() {
       deviceId.current = await loadDeviceId();
       localIp.current = await getLocalIp();
       if (!mounted) return;
-      setStatus(`Discovering backend... (${localIp.current})`);
-
+      setStatus(`Backend: ${apiBaseRef.current}`);
       try {
         apiBaseRef.current = await getApiBase();
         setStatus(`Backend: ${apiBaseRef.current}`);
-      } catch (e: any) { setStatus(`Discovery failed: ${e.message}`); }
-      if (!mounted) return;
-
-      try {
-        const res = await fetch(`${apiBaseRef.current}/auth/guest`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          tokenRef.current = data.token;
-          if (mounted) { setMode('guest'); setScreen('dashboard'); }
-        } else {
-          if (mounted) setScreen('login');
-        }
-      } catch {
-        if (mounted) setScreen('login');
-      }
+      } catch (e: any) { setStatus(`Discovery: ${e.message}`); }
+      setScreen('login');
     })();
     return () => { mounted = false; };
+  }, []);
+
+  const playAlertSound = useCallback(async () => {
+    for (let i = 0; i < 3; i++) {
+      try {
+          if (beepSound.current) {
+            await beepSound.current.stopAsync();
+            await beepSound.current.setPositionAsync(0);
+            await beepSound.current.playAsync();
+        }
+      } catch {}
+      if (i < 2) await new Promise((r) => setTimeout(r, 400));
+    }
+  }, []);
+
+  const speakRepeated = useCallback(async (text: string, rate: number, pitch: number, volume: number) => {
+    for (let i = 0; i < 3; i++) {
+      Speech.stop();
+      await new Promise((r) => setTimeout(r, 100));
+      Speech.speak(text, { language: 'en', rate, pitch, volume });
+      if (i < 2) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }, []);
+
+  const scheduleNotif = useCallback(async (type: string, title: string, body: string, extra: Record<string, string>) => {
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: { title, body, data: { type, ...extra } as any, sound: 'default' },
+        trigger: null,
+      });
+    } catch {}
+  }, []);
+
+  const showAlert = useCallback((data: AlertData) => {
+    setAlert(data);
+    setSurveyData(null);
+    setNewsData(null);
+    setAnswers({});
+    setSurveySubmitted(false);
+    setScreen('alert');
+    setAlertHistory((prev) => [{ ...data, ts: new Date() }, ...prev].slice(0, 20));
+
+    const bg = data.color || codeColor(data.code);
+    const light = luminance(bg) > 0.6;
+    const tc = light ? '#000' : '#fff';
+
+    playAlertSound();
+
+    if (data.voiceEnabled !== false) {
+      const location = data.incidentLocation || data.codeLocation || data.locationName || '';
+      const text = data.voiceText || [displayLabel(data), location ? `in ${location}` : '', data.message].filter(Boolean).join('. ');
+      speakRepeated(text, data.voiceRate || 1.0, data.voicePitch || 1.0, ((data.voiceVolume ?? 80) / 100));
+    }
+
+    Animated.sequence([
+      Animated.timing(pulse, { toValue: 1.03, duration: 300, useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 1, duration: 300, useNativeDriver: true }),
+    ]).start();
+  }, [playAlertSound, speakRepeated]);
+
+  const showSurveyScreen = useCallback((data: SurveyData) => {
+    setSurveyData(data);
+    setAlert(null);
+    setNewsData(null);
+    setAnswers({});
+    setSurveySubmitted(false);
+    setScreen('survey');
+    setSurveyList((prev) => {
+      if (prev.find((s) => s.campaignId === data.campaignId)) return prev;
+      return [...prev, data];
+    });
+  }, []);
+
+  const showNewsScreen = useCallback((data: NewsData) => {
+    setNewsData(data);
+    setAlert(null);
+    setSurveyData(null);
+    setAnswers({});
+    setSurveySubmitted(false);
+    setScreen('news');
+    setNewsList((prev) => {
+      if (prev.find((n) => n.id === data.id)) return prev;
+      return [...prev, data];
+    });
+    setTimeout(() => {
+      setNewsData((prev) => prev?.id === data.id ? null : prev);
+      setScreen('dashboard');
+    }, (data.durationSec || 10) * 1000);
+  }, []);
+
+  const removeNews = useCallback((id: string) => {
+    setNewsData((prev) => prev?.id === id ? null : prev);
+    setNewsList((prev) => prev.filter((n) => n.id !== id));
+    setScreen('dashboard');
   }, []);
 
   const doHeartbeat = useCallback(async () => {
@@ -192,21 +296,44 @@ export default function App() {
       const res = await fetch(`${apiBaseRef.current}/devices/heartbeat`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ip, port: WS_PORT, pcName: `Mobile-${deviceId.current}`, primaryMac: deviceId.current, appVersion: '1.0.0', osVersion: `${Platform.OS} ${Platform.Version}`, online: true, type: 'mobile' }),
+        body: JSON.stringify({
+          ip, port: WS_PORT, pcName: `Mobile-${deviceId.current}`,
+          primaryMac: deviceId.current, appVersion: '1.0.0',
+          osVersion: `${Platform.OS} ${Platform.Version}`,
+          online: true, type: 'mobile',
+        }),
       });
       if (res.ok) {
         const data = await res.json();
         if (data.commands && Array.isArray(data.commands)) {
+          const isBg = appStateRef.current === 'background' || appStateRef.current === 'inactive';
           for (const cmd of data.commands) {
-            if (cmd.type === 'alert' && cmd.data) showAlert(cmd.data);
-            else if (cmd.type === 'survey-campaign' && cmd.data) showSurvey(cmd.data);
-            else if (cmd.type === 'it-news-update' && cmd.data) showNews(cmd.data);
-            else if (cmd.type === 'it-news-remove') removeNews(cmd.data?.id || cmd.requestId);
+            if (cmd.type === 'alert' && cmd.data) {
+              if (isBg) {
+                scheduleNotif('alert', `⚠️ ${displayLabel(cmd.data)}`, cmd.data.message || 'Alert received', { alertData: JSON.stringify(cmd.data) });
+              } else {
+                showAlert(cmd.data);
+              }
+            } else if (cmd.type === 'survey-campaign' && cmd.data) {
+              if (isBg) {
+                scheduleNotif('survey', '📋 New Survey', cmd.data.survey?.title || 'Survey available', { surveyData: JSON.stringify(cmd.data) });
+              } else {
+                showSurveyScreen(cmd.data);
+              }
+            } else if (cmd.type === 'it-news-update' && cmd.data) {
+              if (isBg) {
+                scheduleNotif('news', '📰 ' + cmd.data.title, cmd.data.body || '', { newsData: JSON.stringify(cmd.data) });
+              } else {
+                showNewsScreen(cmd.data);
+              }
+            } else if (cmd.type === 'it-news-remove') {
+              removeNews(cmd.data?.id || cmd.requestId);
+            }
           }
         }
       }
     } catch {}
-  }, [showAlert, showSurvey, showNews, removeNews]);
+  }, [showAlert, showSurveyScreen, showNewsScreen, removeNews, scheduleNotif]);
 
   useEffect(() => {
     if (screen === 'dashboard' || screen === 'alert') {
@@ -218,36 +345,25 @@ export default function App() {
   }, [screen, doHeartbeat]);
 
   useEffect(() => {
-    const sub = AppState.addEventListener('change', async (nextState) => {
+    const sub = AppState.addEventListener('change', (nextState) => {
       if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
         doHeartbeat();
+        if (notificationResp.current) {
+          const data = notificationResp.current.notification.request.content.data;
+          if (data?.type === 'alert' && data?.alertData) {
+            try { showAlert(JSON.parse(data.alertData as string)); } catch {}
+          } else if (data?.type === 'news' && data?.newsData) {
+            try { showNewsScreen(JSON.parse(data.newsData as string)); } catch {}
+          } else if (data?.type === 'survey' && data?.surveyData) {
+            try { showSurveyScreen(JSON.parse(data.surveyData as string)); } catch {}
+          }
+          notificationResp.current = null;
+        }
       }
       appStateRef.current = nextState;
     });
     return () => sub.remove();
-  }, [screen, showAlert, doHeartbeat]);
-
-  const handleLogout = useCallback(async () => {
-    tokenRef.current = null;
-    setMode(null);
-    setUsername('');
-    setPassword('');
-    setScreen('login');
-  }, []);
-
-  const handleGuestLogin = useCallback(async () => {
-    setLoginError('');
-    try {
-      const res = await fetch(`${apiBaseRef.current}/auth/guest`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-      });
-      if (!res.ok) { setLoginError(`Guest login failed (${res.status})`); return; }
-      const data = await res.json();
-      tokenRef.current = data.token;
-      setMode('guest');
-      setScreen('dashboard');
-    } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
-  }, []);
+  }, [showAlert, showNewsScreen, showSurveyScreen, doHeartbeat]);
 
   const handleUserLogin = useCallback(async () => {
     setLoginError('');
@@ -261,23 +377,32 @@ export default function App() {
       if (!res.ok) { setLoginError(`Login failed (${res.status})`); return; }
       const data = await res.json();
       tokenRef.current = data.accessToken;
-      setMode('user');
       setScreen('dashboard');
     } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
   }, [username, password]);
 
+  const handleLogout = useCallback(async () => {
+    tokenRef.current = null;
+    setUsername('');
+    setPassword('');
+    setScreen('login');
+  }, []);
+
   const handleAcknowledge = useCallback(async () => {
-    if (!alert?.id) return;
+    if (!alert) { setAlert(null); setScreen('dashboard'); return; }
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (tokenRef.current) headers['Authorization'] = `Bearer ${tokenRef.current}`;
-      await fetch(`${apiBaseRef.current}/alerts/${alert.id}/ack`, {
-        method: 'POST', headers,
-        body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: mode === 'user' ? username : 'guest' }),
-      });
+      if (alert.id) {
+        await fetch(`${apiBaseRef.current}/alerts/${alert.id}/ack`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
+        });
+      }
     } catch {}
-    setAlert(null); setScreen('dashboard');
-  }, [alert, mode, username]);
+    setAlert(null);
+    setScreen('dashboard');
+  }, [alert]);
 
   const updateAnswer = useCallback((questionId: string, value: string | string[] | number) => {
     setAnswers((prev) => ({ ...prev, [questionId]: value }));
@@ -309,7 +434,6 @@ export default function App() {
 
   const renderQuestion = (q: SurveyQuestion, idx: number) => {
     const answer = answers[q.id];
-    if (!answer && q.type === 'yes_no') { /* no default */ }
     switch (q.type) {
       case 'yes_no':
         return (
@@ -370,40 +494,102 @@ export default function App() {
     }
   };
 
+  // === LOADING ===
   if (screen === 'loading') {
     return (
       <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
-        <Text style={[styles.codeLabel, { color: '#ffffff80' }]}>AlertFlow</Text>
+        <Image source={logoPng} style={{ width: 72, height: 72, borderRadius: 16, marginBottom: 16 }} />
+        <Text style={[styles.brandTitle, { color: '#ffffffcc' }]}>AlertFlow</Text>
         <Text style={[styles.status, { color: '#ffffff60', marginTop: 20 }]}>{status}</Text>
       </View>
     );
   }
 
+  // === LOGIN ===
+  if (screen === 'login') {
+    return (
+      <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
+        <View style={styles.brandWrap}>
+          <View style={styles.brandIcon}>
+            <Text style={styles.brandLetters}>A<Text style={{ color: '#EF4444' }}>F</Text></Text>
+          </View>
+          <View>
+            <Text style={styles.brandTitle}>AlertFlow</Text>
+            <Text style={styles.brandSub}>Command Center</Text>
+          </View>
+        </View>
+        <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
+        <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
+        <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
+        <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin}><Text style={styles.loginBtnText}>Sign In</Text></TouchableOpacity>
+        {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
+      </View>
+    );
+  }
+
+  // === ALERT FULLSCREEN ===
   if (screen === 'alert' && alert) {
-    const bg = alert.color || '#d32f2f';
+    const bg = alert.color || codeColor(alert.code);
     const light = luminance(bg) > 0.6;
     const tc = light ? '#000' : '#fff';
     const location = alert.incidentLocation || alert.codeLocation || alert.locationName || '';
     const title = [displayLabel(alert), location ? `in ${location}` : ''].join(' ');
     return (
-      <View style={[styles.container, { backgroundColor: bg }]}>
+      <View style={[styles.container, { backgroundColor: bg, paddingTop: 50 }]}>
         <StatusBar hidden />
-        <Animated.View style={[styles.overlay, { transform: [{ scale: pulse }] }]}>
-          <Text style={[styles.codeLabel, { color: tc }]}>{title}</Text>
-          {alert.message ? <Text style={[styles.message, { color: tc }]}>{alert.message}</Text> : null}
-          <TouchableOpacity style={[styles.ackBtn, { backgroundColor: light ? '#00000030' : '#ffffff30' }]} onPress={handleAcknowledge}><Text style={[styles.ackBtnText, { color: tc }]}>Acknowledge</Text></TouchableOpacity>
-        </Animated.View>
+        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24 }}>
+          <Text style={[styles.alertLabel, { color: tc }]}>{title}</Text>
+          {alert.message ? <Text style={[styles.alertMsg, { color: tc + 'dd' }]}>{alert.message}</Text> : null}
+
+          {alert.codeDoc ? (
+            <View style={[styles.codeDocBlock, { backgroundColor: light ? '#00000010' : '#ffffff10' }]}>
+              <Text style={[styles.docTitle, { color: tc }]}>About this Code</Text>
+              <Text style={{ color: tc + 'dd', fontSize: 14, lineHeight: 20 }}>{alert.codeDoc}</Text>
+            </View>
+          ) : null}
+
+          {alert.teamActions && alert.teamActions.length > 0 ? (
+            <View style={{ marginTop: 16 }}>
+              <Text style={[styles.docTitle, { color: tc, marginBottom: 10 }]}>Team Actions</Text>
+              {alert.teamActions.map((a, i) => (
+                <View key={i} style={[styles.teamAction, { borderColor: light ? '#00000020' : '#ffffff20' }]}>
+                  <View style={[styles.tnum, { backgroundColor: light ? '#00000015' : '#ffffff15' }]}>
+                    <Text style={[styles.tnumText, { color: tc }]}>{i + 1}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: tc, fontSize: 14, fontWeight: '600' }}>{a.title}</Text>
+                    {a.description ? <Text style={{ color: tc + 'aa', fontSize: 12, marginTop: 2 }}>{a.description}</Text> : null}
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          <View style={[styles.alertBtnRow, { marginTop: 24 }]}>
+            <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000020' : '#ffffff20' }]} onPress={handleAcknowledge}>
+              <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Acknowledge</Text>
+            </TouchableOpacity>
+            {alert.teamActions && alert.teamActions.length > 0 ? (
+              <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000015' : '#ffffff15' }]} onPress={() => Alert.alert('Team Actions', alert.teamActions!.map((a, i) => `${i + 1}. ${a.title}${a.description ? ': ' + a.description : ''}`).join('\n\n'))}>
+                <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>View Actions</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          <Text style={[styles.alertInfo, { color: tc + '99' }]}>🔊 Voice repeating · 🔔 Beep 3x</Text>
+        </ScrollView>
       </View>
     );
   }
 
+  // === SURVEY ===
   if (screen === 'survey' && surveyData) {
     const survey = surveyData.survey;
     return (
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 40 }]}>
         <StatusBar hidden />
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 20 }}>
-          <Text style={[styles.codeLabel, { color: '#ffffffcc', fontSize: 28, marginBottom: 8 }]}>{survey.title}</Text>
+          <Text style={[styles.brandTitle, { fontSize: 28, marginBottom: 8 }]}>{survey.title}</Text>
           {survey.description && <Text style={{ color: '#ffffffa0', fontSize: 16, marginBottom: 20 }}>{survey.description}</Text>}
           {survey.questions.map((q, i) => renderQuestion(q, i))}
           {surveySubmitted ? (
@@ -416,6 +602,7 @@ export default function App() {
     );
   }
 
+  // === NEWS FULLSCREEN ===
   if (screen === 'news' && newsData) {
     const bg = newsData.backgroundColor || '#1a1a2e';
     const tc = newsData.textColor || '#fff';
@@ -425,114 +612,169 @@ export default function App() {
         <View style={styles.newsCard}>
           <Text style={[styles.newsTitle, { color: tc }]}>{newsData.title}</Text>
           {newsData.body ? <Text style={[styles.newsBody, { color: tc + 'cc' }]}>{newsData.body}</Text> : null}
-          <Text style={[styles.newsTimer, { color: tc + '60' }]}>Dismissing in {newsData.durationSec || 10}s</Text>
+          <TouchableOpacity style={{ marginTop: 20, alignSelf: 'center', padding: 10 }} onPress={() => { setNewsData(null); setScreen('dashboard'); }}>
+            <Text style={{ color: tc + '80', fontSize: 14, fontWeight: '600' }}>Dismiss</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
   }
 
-  if (screen === 'login') {
-    return (
-      <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
-        <StatusBar hidden />
-        <Text style={[styles.codeLabel, { color: '#ffffffcc' }]}>AlertFlow</Text>
-        <Text style={{ color: '#ffffff60', marginBottom: 30, fontSize: 16 }}>Sign in for full access</Text>
-        <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
-        <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
-        <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin}><Text style={styles.loginBtnText}>Sign In</Text></TouchableOpacity>
-        <TouchableOpacity style={[styles.loginBtn, { backgroundColor: '#ffffff20', marginTop: 10 }]} onPress={handleGuestLogin}><Text style={[styles.loginBtnText, { color: '#ffffffb0' }]}>Continue as Guest</Text></TouchableOpacity>
-        {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
-      </View>
-    );
-  }
-
+  // === DASHBOARD (3 tabs) ===
   if (screen === 'dashboard') {
-    const connected = mode !== null;
     const recentAlerts = alertHistory.slice(0, 10);
     return (
-      <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 50 }]}>
+      <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
-        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 20 }}>
-          <Text style={[styles.codeLabel, { color: '#ffffffcc', fontSize: 28, marginBottom: 4 }]}>AlertFlow</Text>
-          <Text style={{ color: '#ffffff60', fontSize: 13, marginBottom: 24 }}>Monitoring Dashboard</Text>
-
-          <View style={styles.card}>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}><Text style={{ color: connected ? '#4caf50' : '#f44336', fontSize: 16 }}>●</Text> Connection</Text>
-              <Text style={[styles.rowValue, { color: connected ? '#4caf50' : '#f44336' }]}>{connected ? 'Connected' : 'Disconnected'}</Text>
-            </View>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Device ID</Text>
-              <Text style={[styles.rowValue, { fontFamily: 'monospace', fontSize: 11 }]}>{deviceId.current}</Text>
-            </View>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Backend</Text>
-              <Text style={[styles.rowValue, { fontSize: 12 }]}>{apiBaseRef.current.replace('http://', '')}</Text>
-            </View>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Signed in as</Text>
-              <Text style={styles.rowValue}>{mode === 'user' ? username : 'Guest'}</Text>
+        <View style={styles.topBar}>
+          <View style={styles.brandSmall}>
+            <Image source={logoPng} style={{ width: 32, height: 32, borderRadius: 8 }} />
+            <View>
+              <Text style={styles.brandSmallName}>AlertFlow</Text>
+              <Text style={styles.brandSmallTag}>Mobile</Text>
             </View>
           </View>
+          <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout</Text></TouchableOpacity>
+        </View>
 
-          <View style={[styles.card, { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 }]}>
-            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#4caf50', marginRight: 8 }} />
-            <Text style={{ color: '#ffffffaa', fontSize: 13 }}>Connected — listening for alerts</Text>
-          </View>
+        <View style={styles.statusRow}>
+          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#4caf50' }} />
+          <Text style={{ color: '#ffffff99', fontSize: 13 }}>Connected — listening</Text>
+        </View>
 
-          <Text style={styles.sectionTitle}>Recent Alerts</Text>
+        <View style={styles.tabBar}>
+          {(['alerts', 'news', 'surveys'] as const).map((t) => (
+            <TouchableOpacity key={t} style={[styles.tab, activeTab === t && styles.tabActive]} onPress={() => setActiveTab(t)}>
+              <Text style={[styles.tabText, activeTab === t && styles.tabTextActive]}>{t === 'alerts' ? 'Alerts' : t === 'news' ? 'News' : 'Surveys'}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
-          {recentAlerts.length === 0 ? (
-            <Text style={{ color: '#ffffff40', fontSize: 13, textAlign: 'center', paddingVertical: 24 }}>No alerts received yet</Text>
-          ) : (
-            recentAlerts.map((item, idx) => {
-              const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
-              const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
-              return (
-                <View key={idx} style={styles.alertItem}>
-                  <View style={[styles.alertDot, { backgroundColor: item.color || '#f44336' }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.alertTitle}>{title}</Text>
-                    {item.message ? <Text style={styles.alertMeta}>{item.message}</Text> : null}
-                  </View>
-                </View>
-              );
-            })
+        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 16 }}>
+          {activeTab === 'alerts' && (
+            <>
+              <Text style={styles.sectionTitle}>Alert History</Text>
+              {recentAlerts.length === 0 ? (
+                <View style={styles.emptyState}><Text style={styles.emptyText}>No alerts received yet</Text></View>
+              ) : (
+                recentAlerts.map((item, idx) => {
+                  const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
+                  const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
+                  const bg = item.color || codeColor(item.code);
+                  return (
+                    <View key={idx} style={styles.alertItem}>
+                      <View style={[styles.alertDot, { backgroundColor: bg }]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.alertItemTitle}>{title}</Text>
+                        {item.message ? <Text style={styles.alertItemMeta}>{item.message}</Text> : null}
+                      </View>
+                      <Text style={{ color: '#ffffff40', fontSize: 11 }}>{formatTime(item.ts)}</Text>
+                    </View>
+                  );
+                })
+              )}
+            </>
           )}
 
-          <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-            <Text style={styles.logoutBtnText}>Logout</Text>
-          </TouchableOpacity>
+          {activeTab === 'news' && (
+            <>
+              <Text style={styles.sectionTitle}>News & Awareness</Text>
+              {newsList.length === 0 ? (
+                <View style={styles.emptyState}><Text style={styles.emptyText}>No news received yet</Text></View>
+              ) : (
+                newsList.map((item) => (
+                  <View key={item.id} style={styles.newsCard}>
+                    <View style={[styles.newsTag, { backgroundColor: item.type === 'card' ? '#7b1fa240' : '#3a7bd540' }]}>
+                      <Text style={{ fontSize: 11, fontWeight: '600', color: item.type === 'card' ? '#ce93d8' : '#7bb3ff' }}>{item.type === 'card' ? 'Awareness' : 'Update'}</Text>
+                    </View>
+                    <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.title}</Text>
+                    {item.body ? <Text style={{ color: '#ffffff99', fontSize: 14, lineHeight: 20 }}>{item.body}</Text> : null}
+                  </View>
+                ))
+              )}
+            </>
+          )}
+
+          {activeTab === 'surveys' && (
+            <>
+              <Text style={styles.sectionTitle}>Surveys</Text>
+              {surveyList.length === 0 ? (
+                <View style={styles.emptyState}><Text style={styles.emptyText}>No surveys received yet</Text></View>
+              ) : (
+                surveyList.map((item) => {
+                  const submitted = item.campaignId === surveyData?.campaignId && surveySubmitted;
+                  return (
+                    <View key={item.campaignId} style={styles.surveyCard}>
+                      <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.survey.title}</Text>
+                      {item.survey.description ? <Text style={{ color: '#ffffff80', fontSize: 13, marginBottom: 6 }}>{item.survey.description}</Text> : null}
+                      <Text style={{ color: '#ffffff50', fontSize: 11, marginBottom: 10 }}>{item.survey.questions.length} questions</Text>
+                      {submitted ? (
+                        <Text style={{ color: '#4caf50', fontSize: 13, fontWeight: '600' }}>✓ Submitted</Text>
+                      ) : (
+                        <TouchableOpacity style={styles.fillBtn} onPress={() => showSurveyScreen(item)}>
+                          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>Fill Survey</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                })
+              )}
+            </>
+          )}
         </ScrollView>
       </View>
     );
   }
 
-  return (
-    <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
-      <StatusBar hidden />
-      <Text style={[styles.clock, { color: '#ffffff80' }]}>{clock.toLocaleTimeString()}</Text>
-      <Text style={[styles.status, { color: '#ffffff40', marginTop: 10 }]}>Connected · {mode === 'user' ? username : 'Guest'}</Text>
-    </View>
-  );
+  return null;
 }
 
 const { width } = Dimensions.get('window');
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
-  overlay: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
-  codeLabel: { fontSize: Math.min(72, width * 0.1), fontWeight: '800', textAlign: 'center' },
-  codeName: { fontSize: Math.min(48, width * 0.07), fontWeight: '600', marginTop: 12, textAlign: 'center', opacity: 0.9 },
-  location: { fontSize: Math.min(36, width * 0.05), marginTop: 24, fontWeight: '500', textAlign: 'center', opacity: 0.85 },
-  message: { fontSize: Math.min(24, width * 0.035), marginTop: 16, textAlign: 'center', opacity: 0.75 },
-  clock: { fontSize: Math.min(64, width * 0.09), fontWeight: '200' },
   status: { fontSize: 14, textAlign: 'center' },
   input: { width: '100%', maxWidth: 400, padding: 14, fontSize: 16, backgroundColor: '#ffffff15', borderRadius: 8, color: '#fff', marginBottom: 12, borderWidth: 1, borderColor: '#ffffff30' },
   loginBtn: { width: '100%', maxWidth: 400, padding: 14, borderRadius: 8, backgroundColor: '#3a7bd5', alignItems: 'center' },
   loginBtnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   error: { color: '#ff6b6b', marginTop: 12, fontSize: 14, textAlign: 'center' },
-  ackBtn: { paddingHorizontal: 40, paddingVertical: 14, borderRadius: 8, marginTop: 30 },
-  ackBtnText: { fontSize: 20, fontWeight: '600' },
+  brandWrap: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 36 },
+  brandIcon: { width: 56, height: 56, borderRadius: 14, backgroundColor: '#0c1428', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#1a2a5e' },
+  brandLetters: { fontSize: 22, fontWeight: '900', color: '#3B82F6', letterSpacing: -1 },
+  brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
+  brandSub: { fontSize: 12, color: '#ffffff60', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
+  topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 12, paddingBottom: 4, paddingHorizontal: 16 },
+  brandSmall: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  brandSmallName: { fontSize: 19, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
+  brandSmallTag: { fontSize: 9, color: '#ffffff50', textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: '600' },
+  logoutBtn: { paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: '#ffffff20', borderRadius: 6 },
+  logoutBtnText: { color: '#ffffff60', fontSize: 13 },
+  statusRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 16, flexShrink: 0 },
+  tabBar: { width: '100%', flexDirection: 'row', backgroundColor: '#12122a', borderBottomWidth: 1, borderBottomColor: '#ffffff10', flexShrink: 0 },
+  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabActive: { borderBottomColor: '#3a7bd5' },
+  tabText: { color: '#ffffff60', fontSize: 13, fontWeight: '600' },
+  tabTextActive: { color: '#3a7bd5' },
+  sectionTitle: { color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
+  alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, marginBottom: 8 },
+  alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
+  alertItemTitle: { color: '#ffffffcc', fontSize: 15, fontWeight: '600' },
+  alertItemMeta: { color: '#ffffff60', fontSize: 12, marginTop: 2 },
+  alertLabel: { fontSize: 40, fontWeight: '800', textAlign: 'center', marginBottom: 6 },
+  alertMsg: { fontSize: 18, textAlign: 'center', marginBottom: 20 },
+  codeDocBlock: { borderRadius: 12, padding: 16, marginBottom: 8 },
+  docTitle: { fontSize: 14, fontWeight: '700', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5, opacity: 0.8 },
+  teamAction: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1 },
+  tnum: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
+  tnumText: { fontSize: 13, fontWeight: '700' },
+  alertBtnRow: { flexDirection: 'row', gap: 12 },
+  alertBtn: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
+  alertInfo: { fontSize: 11, textAlign: 'center', marginTop: 12, opacity: 0.6 },
+  newsCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
+  newsTag: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 2, borderRadius: 4, marginBottom: 8 },
+  newsTitle: { fontSize: 24, fontWeight: '700', marginBottom: 12, textAlign: 'center' },
+  newsBody: { fontSize: 16, lineHeight: 24, textAlign: 'center' },
+  surveyCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
+  fillBtn: { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 8, backgroundColor: '#3a7bd5', borderRadius: 6 },
   questionBlock: { marginBottom: 20 },
   questionText: { color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 8 },
   choiceBtn: { padding: 12, borderRadius: 8, backgroundColor: '#ffffff15', marginBottom: 6, borderWidth: 1, borderColor: '#ffffff30' },
@@ -547,19 +789,6 @@ const styles = StyleSheet.create({
   textAnswer: { width: '100%', padding: 12, fontSize: 15, backgroundColor: '#ffffff15', borderRadius: 8, color: '#fff', borderWidth: 1, borderColor: '#ffffff30', minHeight: 80, textAlignVertical: 'top' },
   submitBtn: { width: '100%', padding: 14, borderRadius: 8, backgroundColor: '#4caf50', alignItems: 'center', marginTop: 10 },
   submitBtnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  newsCard: { margin: 20, padding: 24, borderRadius: 12, backgroundColor: '#ffffff15', borderWidth: 1, borderColor: '#ffffff30', maxWidth: 500, width: '100%' },
-  newsTitle: { fontSize: 24, fontWeight: '700', marginBottom: 12, textAlign: 'center' },
-  newsBody: { fontSize: 16, lineHeight: 24, textAlign: 'center' },
-  newsTimer: { fontSize: 12, textAlign: 'center', marginTop: 16 },
-  card: { backgroundColor: '#ffffff0d', borderWidth: 1, borderColor: '#ffffff15', borderRadius: 16, padding: 20, marginBottom: 16 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  rowLabel: { color: '#ffffff80', fontSize: 13 },
-  rowValue: { color: '#ffffffcc', fontSize: 13, fontWeight: '600' },
-  sectionTitle: { color: '#ffffff80', fontSize: 14, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
-  alertItem: { backgroundColor: '#ffffff0d', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, padding: 14, marginBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
-  alertTitle: { color: '#ffffffcc', fontSize: 15, fontWeight: '600' },
-  alertMeta: { color: '#ffffff60', fontSize: 12, marginTop: 2 },
-  logoutBtn: { width: '100%', padding: 14, borderRadius: 12, borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', marginTop: 12 },
-  logoutBtnText: { color: '#ffffff80', fontSize: 15, fontWeight: '600' },
+  emptyState: { alignItems: 'center', paddingVertical: 50 },
+  emptyText: { color: '#ffffff30', fontSize: 14 },
 });

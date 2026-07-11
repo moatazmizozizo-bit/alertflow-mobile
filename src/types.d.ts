@@ -14,3 +14,12 @@ interface Buffer {
   write(string: string, offset?: number, length?: number, encoding?: string): number;
   subarray(start?: number, end?: number): Buffer;
 }
+
+declare module '*.wav' {
+  const src: number;
+  export default src;
+}
+declare module '*.png' {
+  const src: number;
+  export default src;
+}

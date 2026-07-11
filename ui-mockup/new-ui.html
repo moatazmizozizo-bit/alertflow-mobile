@@ -1,0 +1,418 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>AlertFlow Mobile — New UI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d0d1a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:30px 20px}
+h2{color:#fff;margin-bottom:20px;font-weight:300;font-size:18px;letter-spacing:2px;text-transform:uppercase}
+.phone{width:390px;height:844px;background:#1a1a2e;border-radius:44px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);position:relative;border:2px solid #2a2a3e}
+.notch{width:150px;height:30px;background:#0d0d1a;border-radius:0 0 18px 18px;margin:0 auto;position:relative;z-index:10}
+.screen{height:calc(100% - 30px);display:flex;flex-direction:column;position:relative;overflow:hidden}
+
+/* LOGIN */
+.login-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 30px;height:100%}
+.login-screen .brand{display:flex;align-items:center;gap:14px;margin-bottom:36px}
+.login-screen .brand-icon{width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#0c1428,#1a2a5e);display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.08)}
+.login-screen .brand-icon .af-letters{font-size:22px;font-weight:900;color:#3B82F6;letter-spacing:-1px;line-height:1}
+.login-screen .brand-icon .af-letters em{font-style:normal;color:#EF4444}
+.login-screen .brand-text{display:flex;flex-direction:column}
+.login-screen .brand-text .title{font-size:26px;font-weight:800;color:#ffffff;letter-spacing:-.5px;line-height:1.1}
+.login-screen .brand-text .sub{font-size:12px;color:#ffffff60;font-weight:400;letter-spacing:2px;text-transform:uppercase}
+.login-screen .sub{color:#ffffff60;font-size:15px;margin-bottom:36px;text-align:center}
+.login-screen input{width:100%;padding:14px 16px;font-size:16px;background:#ffffff15;border:1px solid #ffffff30;border-radius:8px;color:#fff;margin-bottom:12px;outline:none}
+.login-screen input::placeholder{color:#ffffff60}
+.login-screen .btn{width:100%;padding:14px;border-radius:8px;border:none;font-size:16px;font-weight:600;cursor:pointer;margin-bottom:8px}
+.login-screen .btn-primary{background:#3a7bd5;color:#fff}
+.login-screen .btn-primary:active{background:#2a6bc5}
+.login-screen .note{color:#ffffff40;font-size:12px;margin-top:16px;text-align:center}
+
+/* DASHBOARD */
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:8px 16px 2px;flex-shrink:0}
+.top-bar .brand{display:flex;align-items:center;gap:10px}
+.top-bar .brand-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#0c1428,#1a2a5e);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.08)}
+.top-bar .brand-icon .af-letters{font-size:13px;font-weight:900;color:#3B82F6;letter-spacing:-.5px}
+.top-bar .brand-icon .af-letters em{font-style:normal;color:#EF4444}
+.top-bar .brand-text{display:flex;flex-direction:column;line-height:1}
+.top-bar .brand-text .name{font-size:19px;font-weight:800;color:#ffffffcc;letter-spacing:-.3px}
+.top-bar .brand-text .tag{font-size:9px;color:#ffffff50;text-transform:uppercase;letter-spacing:1.5px;font-weight:600}
+.top-bar .logout{color:#ffffff60;font-size:13px;cursor:pointer;padding:6px 12px;border:1px solid #ffffff20;border-radius:6px}
+.top-bar .logout:active{background:#ffffff10}
+.status-badge{display:flex;align-items:center;gap:6px;padding:8px 16px 4px;font-size:13px;color:#ffffff99;flex-shrink:0}
+.dot-green{width:8px;height:8px;border-radius:50%;background:#4caf50;flex-shrink:0}
+
+.tab-bar{display:flex;background:#12122a;border-bottom:1px solid #ffffff10;flex-shrink:0}
+.tab-bar .tab{flex:1;padding:12px 8px;text-align:center;color:#ffffff60;font-size:13px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab-bar .tab.active{color:#3a7bd5;border-bottom-color:#3a7bd5}
+.tab-content{flex:1;overflow-y:auto;padding:16px;display:none}
+.tab-content.active{display:block}
+
+.section-title{color:#ffffff80;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+
+.alert-item{display:flex;align-items:center;gap:12px;padding:14px;background:#ffffff08;border:1px solid #ffffff10;border-radius:12px;margin-bottom:8px;cursor:pointer}
+.alert-item:active{background:#ffffff12}
+.alert-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.alert-info{flex:1}
+.alert-title{color:#ffffffcc;font-size:15px;font-weight:600}
+.alert-meta{color:#ffffff60;font-size:12px;margin-top:2px}
+.alert-time{color:#ffffff40;font-size:11px}
+
+.news-card{padding:18px;background:#ffffff08;border:1px solid #ffffff10;border-radius:14px;margin-bottom:12px}
+.news-card .tag{display:inline-block;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:600;margin-bottom:8px}
+.news-card .tag.card{background:#7b1fa240;color:#ce93d8}
+.news-card .tag.strip{background:#3a7bd540;color:#7bb3ff}
+.news-card h3{color:#ffffffcc;font-size:16px;font-weight:600;margin-bottom:4px}
+.news-card p{color:#ffffff99;font-size:14px;line-height:1.5}
+.news-card .ts{color:#ffffff50;font-size:11px;margin-top:8px}
+
+.survey-item{padding:18px;background:#ffffff08;border:1px solid #ffffff10;border-radius:14px;margin-bottom:12px}
+.survey-item h3{color:#ffffffcc;font-size:16px;font-weight:600;margin-bottom:4px}
+.survey-item p{color:#ffffff80;font-size:13px;margin-bottom:6px}
+.survey-item .meta{color:#ffffff50;font-size:11px;margin-bottom:10px}
+.survey-item .btn-fill{padding:8px 20px;background:#3a7bd5;border:none;border-radius:6px;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+.survey-item .btn-fill:active{background:#2a6bc5}
+.survey-item .submitted{color:#4caf50;font-size:13px;font-weight:600}
+
+/* ALERT FULLSCREEN */
+.alert-overlay{display:none;position:absolute;inset:0;flex-direction:column;padding:50px 30px 30px;z-index:20}
+.alert-overlay.active{display:flex}
+.alert-overlay .scroll-area{flex:1;overflow-y:auto}
+.alert-overlay .alabel{font-size:40px;font-weight:800;text-align:center;margin-bottom:6px}
+.alert-overlay .amsg{font-size:18px;text-align:center;opacity:.85;margin-bottom:20px}
+
+.alert-overlay .code-doc{background:#ffffff10;border-radius:12px;padding:16px;margin-bottom:16px}
+.alert-overlay .code-doc h4{font-size:14px;font-weight:700;margin-bottom:8px;opacity:.8;text-transform:uppercase;letter-spacing:.5px}
+.alert-overlay .code-doc p{font-size:14px;line-height:1.5;opacity:.85}
+
+.alert-overlay .team-action{background:#ffffff08;border:1px solid #ffffff20;border-radius:12px;padding:14px;margin-bottom:8px;display:flex;align-items:center;gap:12px}
+.team-action .tnum{width:26px;height:26px;border-radius:13px;background:#ffffff15;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0}
+.team-action .tinfo{flex:1}
+.team-action .tinfo .ttitle{font-size:14px;font-weight:600}
+.team-action .tinfo .tdesc{font-size:12px;opacity:.7;margin-top:2px}
+
+.alert-overlay .action-row{display:flex;gap:12px;margin-top:16px;padding-bottom:10px}
+.alert-overlay .action-row button{flex:1;padding:12px;border-radius:8px;border:none;font-size:15px;font-weight:600;cursor:pointer}
+.alert-overlay .action-row button:active{opacity:.8}
+.alert-overlay .ack-btn{background:#ffffff20;color:inherit}
+.alert-overlay .team-btn{background:#ffffff15;color:inherit}
+
+.alert-overlay .ainfo{font-size:11px;opacity:.6;text-align:center;margin-top:12px}
+
+/* NOTIFICATION */
+.notif-overlay{display:none;position:absolute;top:12px;left:12px;right:12px;background:#1e1e3a;border-radius:16px;padding:16px;border:1px solid #ffffff15;z-index:30;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+.notif-overlay.active{display:block}
+.notif-overlay .nheader{display:flex;justify-content:space-between;align-items:center;color:#ffffff80;font-size:12px;margin-bottom:8px}
+.notif-overlay .nheader .brand{display:flex;align-items:center;gap:6px}
+.notif-overlay .nheader .brand-icon{width:18px;height:18px;border-radius:4px;background:linear-gradient(135deg,#0c1428,#1a2a5e);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:900;color:#3B82F6}
+.notif-overlay .nheader .brand-icon em{font-style:normal;color:#EF4444}
+.notif-overlay .ntitle{color:#fff;font-size:15px;font-weight:600;margin-bottom:4px}
+.notif-overlay .nbody{color:#ffffff80;font-size:13px}
+.notif-overlay .ntap{color:#3a7bd5;font-size:12px;margin-top:10px;font-weight:600}
+
+.empty-state{text-align:center;color:#ffffff30;font-size:14px;padding:50px 0}
+.empty-state .icon{font-size:36px;margin-bottom:10px;opacity:.4}
+
+.controls{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:16px;max-width:390px}
+.controls button{padding:6px 12px;border-radius:6px;border:1px solid #ffffff20;background:#1a1a2e;color:#ffffff99;font-size:12px;cursor:pointer}
+.controls button:active{background:#3a7bd5;color:#fff;border-color:#3a7bd5}
+</style>
+</head><body>
+
+<h2>AlertFlow Mobile — New UI</h2>
+
+<div class="phone">
+<div class="notch"></div>
+<div class="screen">
+
+<!-- LOGIN -->
+<div id="loginScreen" class="login-screen">
+  <div class="brand">
+    <div class="brand-icon">
+      <div class="af-letters">A<em>F</em></div>
+    </div>
+    <div class="brand-text">
+      <div class="title">AlertFlow</div>
+      <div class="sub">Command Center</div>
+    </div>
+  </div>
+  <div class="sub">Sign in to receive alerts</div>
+  <input type="text" placeholder="Username" disabled>
+  <input type="password" placeholder="Password" disabled>
+  <button class="btn btn-primary" onclick="goDashboard()">Sign In</button>
+  <div class="note">Guest login removed — login required</div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dashboard" style="display:none;flex-direction:column;height:100%">
+  <div class="top-bar">
+    <div class="brand">
+      <div class="brand-icon">
+        <div class="af-letters">A<em>F</em></div>
+      </div>
+      <div class="brand-text">
+        <div class="name">AlertFlow</div>
+        <div class="tag">Mobile</div>
+      </div>
+    </div>
+    <div class="logout" onclick="goLogin()">Logout</div>
+  </div>
+  <div class="status-badge"><span class="dot-green"></span>Connected — listening</div>
+
+  <div class="tab-bar">
+    <div class="tab active" data-tab="alerts" onclick="switchTab(this)">Alerts</div>
+    <div class="tab" data-tab="news" onclick="switchTab(this)">News</div>
+    <div class="tab" data-tab="surveys" onclick="switchTab(this)">Surveys</div>
+  </div>
+
+  <!-- Alerts tab -->
+  <div class="tab-content active" id="tab-alerts">
+    <div class="section-title">Recent Alerts</div>
+    <div class="alert-item" onclick="showAlert('red','Code Red in ICU','Cardiac arrest — Room 302',true)">
+      <span class="alert-dot" style="background:#d32f2f"></span>
+      <div class="alert-info"><div class="alert-title">Code Red in ICU</div><div class="alert-meta">Cardiac arrest — Room 302</div></div>
+      <div class="alert-time">2m ago</div>
+    </div>
+    <div class="alert-item" onclick="showAlert('blue','Code Blue in Ward 2','Respiratory distress — Bed 4',false)">
+      <span class="alert-dot" style="background:#1565c0"></span>
+      <div class="alert-info"><div class="alert-title">Code Blue in Ward 2</div><div class="alert-meta">Respiratory distress — Bed 4</div></div>
+      <div class="alert-time">15m ago</div>
+    </div>
+    <div class="alert-item" onclick="showAlert('yellow','Code Yellow in ER','Mass casualty — 3 incoming',true)">
+      <span class="alert-dot" style="background:#fdd835"></span>
+      <div class="alert-info"><div class="alert-title">Code Yellow in ER</div><div class="alert-meta">Mass casualty — 3 incoming</div></div>
+      <div class="alert-time">1h ago</div>
+    </div>
+    <div class="alert-item" onclick="showAlert('orange','Code Orange in Radiology','Hazmat spill contained',true)">
+      <span class="alert-dot" style="background:#ff8f00"></span>
+      <div class="alert-info"><div class="alert-title">Code Orange in Radiology</div><div class="alert-meta">Hazmat spill contained</div></div>
+      <div class="alert-time">3h ago</div>
+    </div>
+  </div>
+
+  <!-- News tab -->
+  <div class="tab-content" id="tab-news">
+    <div class="news-card">
+      <span class="tag card">Awareness</span>
+      <h3>Hand Hygiene Reminder</h3>
+      <p>All staff must follow proper hand hygiene protocols. New guidelines posted in each ward.</p>
+      <div class="ts">Today 09:30</div>
+    </div>
+    <div class="news-card">
+      <span class="tag strip">Update</span>
+      <h3>COVID-19 Booster Available</h3>
+      <p>Booster doses now available for all healthcare workers. Visit the staff clinic.</p>
+      <div class="ts">Yesterday 14:15</div>
+    </div>
+  </div>
+
+  <!-- Surveys tab -->
+  <div class="tab-content" id="tab-surveys">
+    <div class="survey-item">
+      <h3>Workplace Satisfaction</h3>
+      <p>12 questions · Est. 5 min</p>
+      <div class="meta">Expires: Jul 15, 2026</div>
+      <button class="btn-fill">Fill Survey</button>
+    </div>
+    <div class="survey-item">
+      <h3>Training Needs Assessment</h3>
+      <p>8 questions · Est. 3 min</p>
+      <div class="meta">Expires: Jul 20, 2026</div>
+      <span class="submitted">✓ Submitted</span>
+    </div>
+  </div>
+</div>
+
+<!-- ALERT OVERLAY -->
+<div id="alertOverlay" class="alert-overlay" style="background:#d32f2f">
+  <div class="scroll-area">
+    <div class="alabel" style="color:#fff" id="alertLabel">Code Red in ICU</div>
+    <div class="amsg" style="color:#fff" id="alertMsg">Cardiac arrest — Room 302</div>
+
+    <!-- Code Documentation -->
+    <div class="code-doc" id="codeDocBlock" style="display:none">
+      <h4 style="color:#fff">About this Code</h4>
+      <p id="codeDocText" style="color:#fff">Code Red indicates fire or smoke. Evacuate area immediately and follow fire safety protocols.</p>
+    </div>
+
+    <!-- Team Actions -->
+    <div id="teamActionsBlock" style="display:none">
+      <h4 style="color:#fff;font-size:14px;font-weight:700;margin-bottom:10px;opacity:.8;text-transform:uppercase;letter-spacing:.5px">Team Actions</h4>
+      <div id="teamActionsList"></div>
+    </div>
+
+    <div class="action-row">
+      <button class="ack-btn" onclick="dismissAlert()">Acknowledge</button>
+      <button class="team-btn" id="teamBtn" onclick="alert('Team actions assigned')">View Actions</button>
+    </div>
+
+    <div class="ainfo" id="alertInfo" style="color:#fff">🔊 Speaking "Code Red in ICU" (3/3) · 🔔 Beep 3x</div>
+  </div>
+</div>
+
+<!-- NOTIFICATION POPUP -->
+<div id="notifPopup" class="notif-overlay">
+  <div class="nheader">
+    <div class="brand">
+      <div class="brand-icon"><div class="af-letters">A<em>F</em></div></div>
+      <span>AlertFlow</span>
+    </div>
+    <span>just now</span>
+  </div>
+  <div class="ntitle" id="notifTitle">⚠️ Code Red in ICU</div>
+  <div class="nbody" id="notifBody">Cardiac arrest — Room 302</div>
+  <div class="ntap">Tap to open →</div>
+</div>
+
+</div></div>
+
+<div class="controls">
+  <button onclick="goLogin()">Login</button>
+  <button onclick="goDashboard()">Dashboard</button>
+  <button onclick="switchTabBy(0)">Alerts</button>
+  <button onclick="switchTabBy(1)">News</button>
+  <button onclick="switchTabBy(2)">Surveys</button>
+  <button onclick="showAlert('red','Code Red in ICU','Cardiac arrest — Room 302',true)" style="color:#d32f2f">Red</button>
+  <button onclick="showAlert('blue','Code Blue in Ward 2','Respiratory distress',false)" style="color:#1565c0">Blue</button>
+  <button onclick="showAlert('yellow','Code Yellow in ER','Mass casualty',true)" style="color:#fdd835">Yellow</button>
+  <button onclick="showAlert('orange','Code Orange in Radiology','Hazmat spill',true)" style="color:#ff8f00">Orange</button>
+  <button onclick="showNotif('alert','⚠️ Code Red in ICU','Cardiac arrest — Room 302')">Notif</button>
+  <button onclick="showNotif('survey','📋 New Survey','Workplace Satisfaction')">N Survey</button>
+</div>
+
+<script>
+const colors={red:'#d32f2f',blue:'#1565c0',yellow:'#fdd835',orange:'#ff8f00',green:'#2e7d32',purple:'#7b1fa2',pink:'#c2185b',gray:'#616161',white:'#f5f5f5',black:'#212121'}
+const tColors={yellow:'#000',orange:'#000',green:'#fff',red:'#fff',blue:'#fff',purple:'#fff',pink:'#fff',gray:'#fff',white:'#000',black:'#fff'}
+const codeDocs={
+  red:'Code Red indicates fire or smoke. Immediately evacuate the area, sound the fire alarm, and follow fire safety protocols. All non-essential personnel must clear the zone.',
+  blue:'Code Blue indicates a medical emergency (cardiac/respiratory arrest). The resuscitation team must respond immediately with crash cart to the location.',
+  yellow:'Code Yellow indicates a disaster/mass casualty incident. All available staff report to the Emergency Department. Activate disaster protocol.',
+  orange:'Code Orange indicates a hazardous material spill. Evacuate the contaminated area. Only trained hazmat personnel should respond.'
+}
+const teamActions={
+  red:[
+    {title:'Evacuate Area',desc:'Clear all patients and staff from immediate vicinity'},
+    {title:'Sound Alarm',desc:'Activate the nearest fire alarm pull station'},
+    {title:'Close Doors',desc:'Close all fire doors to contain the area'},
+    {title:'Report to Chief',desc:'Report to the Fire Safety Chief at the staging area'}
+  ],
+  blue:[
+    {title:'Bring Crash Cart',desc:'Retrieve the crash cart to the patient location'},
+    {title:'Start CPR',desc:'Begin chest compressions at 100-120/min'},
+    {title:'Attach AED',desc:'Apply pads and follow AED prompts'},
+    {title:'Document',desc:'Assign a recorder to document the event'}
+  ],
+  yellow:[
+    {title:'Report to ED',desc:'All available staff report to Emergency Department'},
+    {title:'Prepare Triage',desc:'Set up triage area outside the ED'},
+    {title:'Clear Beds',desc:'Discharge or transfer stable patients to free beds'},
+    {title:'Mobilize Supplies',desc:'Bring additional supplies to the ED'}
+  ],
+  orange:[
+    {title:'Evacuate Zone',desc:'Evacuate the contaminated area immediately'},
+    {title:'Contain Spill',desc:'Use hazmat kit to contain the spill'},
+    {title:'Decontaminate',desc:'Set up decontamination station'},
+    {title:'Notify Safety',desc:'Contact Environmental Health & Safety'}
+  ]
+}
+
+function goLogin(){
+  document.getElementById('loginScreen').style.display='flex'
+  document.getElementById('dashboard').style.display='none'
+  document.getElementById('alertOverlay').classList.remove('active')
+  document.getElementById('notifPopup').classList.remove('active')
+}
+function goDashboard(){
+  document.getElementById('loginScreen').style.display='none'
+  document.getElementById('dashboard').style.display='flex'
+  document.getElementById('alertOverlay').classList.remove('active')
+  document.getElementById('notifPopup').classList.remove('active')
+}
+function switchTab(el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'))
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'))
+  el.classList.add('active')
+  document.getElementById('tab-'+el.dataset.tab).classList.add('active')
+}
+function switchTabBy(i){
+  const tabs=document.querySelectorAll('.tab')
+  if(tabs[i]) switchTab(tabs[i])
+}
+
+function showAlert(key,label,msg,hasDetails){
+  const bg=colors[key]||'#d32f2f',tc=tColors[key]||'#fff'
+  const ov=document.getElementById('alertOverlay')
+  ov.style.background=bg
+  document.getElementById('alertLabel').style.color=tc
+  document.getElementById('alertLabel').textContent=label
+  document.getElementById('alertMsg').style.color=tc
+  document.getElementById('alertMsg').textContent=msg
+  document.getElementById('alertInfo').style.color=tc
+  document.getElementById('alertInfo').textContent='🔊 Speaking "'+label+'" (3/3) · 🔔 Beep 3x'
+
+  // Code doc
+  const docBlock=document.getElementById('codeDocBlock')
+  const docText=document.getElementById('codeDocText')
+  if(hasDetails && codeDocs[key]){
+    docBlock.style.display='block'
+    docText.textContent=codeDocs[key]
+    docText.style.color=tc
+    docBlock.querySelector('h4').style.color=tc
+    docBlock.style.background=tc==='#000'?'#00000010':'#ffffff10'
+  } else {
+    docBlock.style.display='none'
+  }
+
+  // Team actions
+  const taBlock=document.getElementById('teamActionsBlock')
+  const taList=document.getElementById('teamActionsList')
+  if(hasDetails && teamActions[key]){
+    taBlock.style.display='block'
+    taList.innerHTML=''
+    taBlock.querySelector('h4').style.color=tc
+    teamActions[key].forEach((a,i)=>{
+      const div=document.createElement('div')
+      div.className='team-action'
+      div.innerHTML='<div class="tnum" style="background:'+(tc==='#000'?'#00000015':'#ffffff15')+';color:'+tc+'">'+(i+1)+'</div><div class="tinfo"><div class="ttitle" style="color:'+tc+'">'+a.title+'</div><div class="tdesc" style="color:'+tc+'">'+a.desc+'</div></div>'
+      taList.appendChild(div)
+    })
+  } else {
+    taBlock.style.display='none'
+  }
+
+  // Buttons
+  const ack=ov.querySelector('.ack-btn')
+  ack.style.background=tc==='#000'?'#00000020':'#ffffff20'
+  ack.style.color=tc
+  const teamBtn=document.getElementById('teamBtn')
+  if(hasDetails){
+    teamBtn.style.display='block'
+    teamBtn.style.background=tc==='#000'?'#00000015':'#ffffff15'
+    teamBtn.style.color=tc
+  } else {
+    teamBtn.style.display='none'
+  }
+
+  document.getElementById('notifPopup').classList.remove('active')
+  ov.classList.add('active')
+}
+function dismissAlert(){
+  document.getElementById('alertOverlay').classList.remove('active')
+}
+function showNotif(type,title,body){
+  document.getElementById('alertOverlay').classList.remove('active')
+  const n=document.getElementById('notifPopup')
+  document.getElementById('notifTitle').textContent=title
+  document.getElementById('notifBody').textContent=body
+  n.classList.add('active')
+  setTimeout(()=>{
+    n.classList.remove('active')
+    if(type==='alert'){
+      const cs=['red','blue','yellow','orange']
+      const c=cs[Math.floor(Math.random()*cs.length)]
+      const labs={'red':'Code Red in ICU','blue':'Code Blue in Ward 2','yellow':'Code Yellow in ER','orange':'Code Orange in Radiology'}
+      showAlert(c,labs[c],body,true)
+    }
+  },2000)
+}
+</script>
+</body></html>
