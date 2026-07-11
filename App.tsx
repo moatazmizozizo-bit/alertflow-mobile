@@ -9,7 +9,7 @@ import { Audio } from 'expo-av';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import beepWav from './assets/beep.wav';
-import logoPng from './assets/alertflow-logo.png';
+import logoPng from './assets/alertflow-icon.png';
 import { getLocalIp, getApiBase } from './src/services/config';
 
 const WS_PORT = 3004;
@@ -627,19 +627,17 @@ export default function App() {
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
         <View style={styles.topBar}>
-          <View style={styles.brandSmall}>
-            <Image source={logoPng} style={{ width: 32, height: 32, borderRadius: 8 }} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Image source={logoPng} style={styles.topLogo} resizeMode="contain" />
             <View>
-              <Text style={styles.brandSmallName}>AlertFlow</Text>
-              <Text style={styles.brandSmallTag}>Mobile</Text>
+              <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }}>AlertFlow</Text>
+              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center</Text>
             </View>
           </View>
-          <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout</Text></TouchableOpacity>
-        </View>
-
-        <View style={styles.statusRow}>
-          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#4caf50' }} />
-          <Text style={{ color: '#ffffff99', fontSize: 13 }}>Connected — listening</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>Live</Text></View>
+            <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>MO</Text></TouchableOpacity>
+          </View>
         </View>
 
         <View style={styles.tabBar}>
@@ -742,18 +740,19 @@ const styles = StyleSheet.create({
   brandLetters: { fontSize: 22, fontWeight: '900', color: '#3B82F6', letterSpacing: -1 },
   brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
   brandSub: { fontSize: 12, color: '#ffffff60', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
-  topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 12, paddingBottom: 4, paddingHorizontal: 16 },
-  brandSmall: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  brandSmallName: { fontSize: 19, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
-  brandSmallTag: { fontSize: 9, color: '#ffffff50', textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: '600' },
-  logoutBtn: { paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: '#ffffff20', borderRadius: 6 },
-  logoutBtnText: { color: '#ffffff60', fontSize: 13 },
+  topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
+  topLogo: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#0c1428', borderWidth: 1, borderColor: '#ffffff10' },
+  livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
+  liveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22c55e' },
+  liveText: { color: '#86efac', fontSize: 11, fontWeight: '600' },
+  avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center' },
+  avatarText: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
   statusRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 16, flexShrink: 0 },
-  tabBar: { width: '100%', flexDirection: 'row', backgroundColor: '#12122a', borderBottomWidth: 1, borderBottomColor: '#ffffff10', flexShrink: 0 },
-  tab: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
-  tabActive: { borderBottomColor: '#3a7bd5' },
-  tabText: { color: '#ffffff60', fontSize: 13, fontWeight: '600' },
-  tabTextActive: { color: '#3a7bd5' },
+  tabBar: { width: '100%', flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingBottom: 12, flexShrink: 0 },
+  tab: { flex: 1, paddingVertical: 11, alignItems: 'center', borderRadius: 13, borderWidth: 1, borderColor: '#ffffff12', backgroundColor: '#101728' },
+  tabActive: { backgroundColor: '#3a7bd5', borderColor: 'transparent' },
+  tabText: { color: '#8a97b0', fontSize: 13.5, fontWeight: '600' },
+  tabTextActive: { color: '#ffffff' },
   sectionTitle: { color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
   alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, marginBottom: 8 },
   alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
