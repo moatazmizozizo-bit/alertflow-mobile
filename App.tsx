@@ -5,10 +5,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
-import { Audio } from 'expo-av';
-import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import beepWav from './assets/beep.wav';
 import logoPng from './assets/alertflow-icon.png';
 import { getLocalIp, getApiBase } from './src/services/config';
 
@@ -139,45 +136,6 @@ export default function App() {
   const apiBaseRef = useRef('http://192.168.1.100:3000');
   const tokenRef = useRef<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
-  const beepSound = useRef<Audio.Sound | null>(null);
-  const notificationResp = useRef<Notifications.NotificationResponse | null>(null);
-
-  useEffect(() => {
-    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true }).catch(() => {});
-    const load = async () => {
-      const { sound } = await Audio.Sound.createAsync(beepWav, { volume: 1 });
-      beepSound.current = sound;
-    };
-    load();
-    return () => { beepSound.current?.unloadAsync(); };
-  }, []);
-
-  useEffect(() => {
-    try {
-      Notifications.setNotificationHandler({
-        handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
-      });
-    } catch (e) { console.warn('setNotificationHandler failed', e); }
-    Notifications.requestPermissionsAsync();
-    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      notificationResp.current = response;
-      const data = response.notification.request.content.data;
-      if (data?.type === 'alert' && data?.alertData) {
-        const ad = JSON.parse(data.alertData as string) as AlertData;
-        setAlert(ad);
-        setScreen('alert');
-      } else if (data?.type === 'news' && data?.newsData) {
-        const nd = JSON.parse(data.newsData as string) as NewsData;
-        setNewsData(nd);
-        setScreen('news');
-      } else if (data?.type === 'survey' && data?.surveyData) {
-        const sd = JSON.parse(data.surveyData as string) as SurveyData;
-        setSurveyData(sd);
-        setScreen('survey');
-      }
-    });
-    return () => sub.remove();
-  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -196,16 +154,6 @@ export default function App() {
   }, []);
 
   const playAlertSound = useCallback(async () => {
-    for (let i = 0; i < 3; i++) {
-      try {
-          if (beepSound.current) {
-            await beepSound.current.stopAsync();
-            await beepSound.current.setPositionAsync(0);
-            await beepSound.current.playAsync();
-        }
-      } catch {}
-      if (i < 2) await new Promise((r) => setTimeout(r, 400));
-    }
   }, []);
 
   const speakRepeated = useCallback(async (text: string, rate: number, pitch: number, volume: number) => {
@@ -218,12 +166,6 @@ export default function App() {
   }, []);
 
   const scheduleNotif = useCallback(async (type: string, title: string, body: string, extra: Record<string, string>) => {
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: { title, body, data: { type, ...extra } as any, sound: 'default' },
-        trigger: null,
-      });
-    } catch {}
   }, []);
 
   const showAlert = useCallback((data: AlertData) => {
@@ -349,17 +291,6 @@ export default function App() {
     const sub = AppState.addEventListener('change', (nextState) => {
       if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
         doHeartbeat();
-        if (notificationResp.current) {
-          const data = notificationResp.current.notification.request.content.data;
-          if (data?.type === 'alert' && data?.alertData) {
-            try { showAlert(JSON.parse(data.alertData as string)); } catch {}
-          } else if (data?.type === 'news' && data?.newsData) {
-            try { showNewsScreen(JSON.parse(data.newsData as string)); } catch {}
-          } else if (data?.type === 'survey' && data?.surveyData) {
-            try { showSurveyScreen(JSON.parse(data.surveyData as string)); } catch {}
-          }
-          notificationResp.current = null;
-        }
       }
       appStateRef.current = nextState;
     });
