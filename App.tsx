@@ -7,7 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import logoPng from './assets/alertflow-icon.png';
-import { getLocalIp, getApiBase } from './src/services/config';
+import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
 
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
@@ -119,6 +119,7 @@ export default function App() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [serverInput, setServerInput] = useState('http://192.168.1.100:3000');
   const [alert, setAlert] = useState<AlertData | null>(null);
   const [surveyData, setSurveyData] = useState<SurveyData | null>(null);
   const [answers, setAnswers] = useState<AnswerMap>({});
@@ -146,6 +147,7 @@ export default function App() {
       setStatus(`Backend: ${apiBaseRef.current}`);
       try {
         apiBaseRef.current = await getApiBase();
+        setServerInput(apiBaseRef.current);
         setStatus(`Backend: ${apiBaseRef.current}`);
       } catch (e: any) { setStatus(`Discovery: ${e.message}`); }
       setScreen('login');
@@ -301,6 +303,9 @@ export default function App() {
     setLoginError('');
     if (!username.trim() || !password.trim()) { setLoginError('Username and password required'); return; }
     try {
+      const base = serverInput.trim().replace(/\/+$/, '');
+      apiBaseRef.current = base;
+      await saveApiBase(base);
       const res = await fetch(`${apiBaseRef.current}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -451,6 +456,7 @@ export default function App() {
           </View>
         </View>
         <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
+        <TextInput style={styles.input} placeholder="Server address (http://ip:3000)" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
         <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
         <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
         <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin}><Text style={styles.loginBtnText}>Sign In</Text></TouchableOpacity>
