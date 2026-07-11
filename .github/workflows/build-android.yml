@@ -16,11 +16,11 @@ jobs:
         run: npm ci
       - name: Prebuild (generate android project + link native modules)
         run: npx expo prebuild --platform android --clean
-      - name: Generate debug keystore (so the release APK is signed & installable)
-        run: keytool -genkey -v -keystore android/app/debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
-      - name: Build release APK (Gradle bundles the JS via expo export:embed)
-        run: cd android && ./gradlew assembleRelease --no-daemon
+      - name: Force debug build to bundle the JS (debug skips bundling by default)
+        run: sed -i 's|.*debuggableVariants = \["liteDebug", "prodDebug"\].*|    debuggableVariants = []|' android/app/build.gradle
+      - name: Build debug APK (Gradle bundles the JS via expo export:embed)
+        run: cd android && ./gradlew assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: alertflow-mobile-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/debug/*.apk
