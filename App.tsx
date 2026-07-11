@@ -117,10 +117,6 @@ function luminance(hex: string): number {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
-});
-
 export default function App() {
   const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
   const [username, setUsername] = useState('');
@@ -147,7 +143,7 @@ export default function App() {
   const notificationResp = useRef<Notifications.NotificationResponse | null>(null);
 
   useEffect(() => {
-    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true });
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, shouldDuckAndroid: true }).catch(() => {});
     const load = async () => {
       const { sound } = await Audio.Sound.createAsync(beepWav, { volume: 1 });
       beepSound.current = sound;
@@ -157,6 +153,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      Notifications.setNotificationHandler({
+        handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
+      });
+    } catch (e) { console.warn('setNotificationHandler failed', e); }
     Notifications.requestPermissionsAsync();
     const sub = Notifications.addNotificationResponseReceivedListener((response) => {
       notificationResp.current = response;
