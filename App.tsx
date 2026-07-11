@@ -310,21 +310,20 @@ export default function App() {
         if (data.commands && Array.isArray(data.commands)) {
           const isBg = appStateRef.current === 'background' || appStateRef.current === 'inactive';
           for (const cmd of data.commands) {
-            const isAlertType = cmd.type === 'alert' || cmd.type === 'alert-clear';
-            const inner = isAlertType && cmd.data?.type === cmd.type ? cmd.data.data : cmd.data;
-            if (cmd.type === 'alert' && inner) {
+            const payload = cmd.data?.type === cmd.type ? cmd.data.data : cmd.data;
+            if (cmd.type === 'alert' && payload) {
               if (isBg) {
-                scheduleNotif('alert', `⚠️ ${displayLabel(inner)}`, inner.message || 'Alert received', { alertData: JSON.stringify(inner) });
+                scheduleNotif('alert', `⚠️ ${displayLabel(payload)}`, payload.message || 'Alert received', { alertData: JSON.stringify(payload) });
               } else {
-                showAlert(inner);
+                showAlert(payload);
               }
-            } else if (cmd.type === 'alert-clear' && inner) {
-              showAlert({ ...inner, isClear: true });
-            } else if (cmd.type === 'survey-campaign' && cmd.data) {
+            } else if (cmd.type === 'alert-clear' && payload) {
+              if (!isBg) showAlert({ ...payload, isClear: true });
+            } else if (cmd.type === 'survey-campaign' && payload) {
               if (isBg) {
-                scheduleNotif('survey', '📋 New Survey', cmd.data.survey?.title || 'Survey available', { surveyData: JSON.stringify(cmd.data) });
+                scheduleNotif('survey', '📋 New Survey', payload.survey?.title || 'Survey available', { surveyData: JSON.stringify(payload) });
               } else {
-                showSurveyScreen(cmd.data);
+                showSurveyScreen(payload);
               }
             } else if (cmd.type === 'it-news-update' && cmd.data) {
               if (isBg) {
@@ -663,7 +662,13 @@ export default function App() {
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
         <View style={styles.topBar}>
-          <Image source={logoPng} style={styles.topLogo} resizeMode="contain" />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Image source={iconPng} style={styles.topIcon} resizeMode="contain" />
+            <View>
+              <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }}>AlertFlow</Text>
+              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center</Text>
+            </View>
+          </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
             <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>Live</Text></View>
             <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>MO</Text></TouchableOpacity>
@@ -771,7 +776,7 @@ const styles = StyleSheet.create({
   brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
   brandSub: { fontSize: 12, color: '#ffffff60', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
   topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
-  topLogo: { height: 32, width: 133 },
+  topIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#0c1428', borderWidth: 1, borderColor: '#ffffff10' },
   livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
   liveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22c55e' },
   liveText: { color: '#86efac', fontSize: 11, fontWeight: '600' },
