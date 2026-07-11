@@ -32,6 +32,11 @@
         "android": {
           "usesCleartextTraffic": true
         }
+      }],
+      ["expo-notifications", {
+        "icon": "./assets/notification-icon.png",
+        "color": "#d32f2f",
+        "defaultChannel": "alerts"
       }]
     ],
     "extra": {
