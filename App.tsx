@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
-import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import iconPng from './assets/alertflow-icon.png';
 import logoPng from './assets/alertflow-logo.png';
@@ -148,18 +147,6 @@ export default function App() {
   const AUTH_SAVED_AT_KEY = 'authSavedAt';
 
   useEffect(() => {
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldShowBanner: true,
-        shouldShowList: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
-    });
-  }, []);
-
-  useEffect(() => {
     let mounted = true;
     (async () => {
       deviceId.current = await loadDeviceId();
@@ -210,10 +197,10 @@ export default function App() {
 
   const scheduleNotif = useCallback(async (type: string, title: string, body: string, extra: Record<string, string>) => {
     try {
-      await Notifications.scheduleNotificationAsync({
-        content: { title, body, data: extra, sound: true },
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL, seconds: 1 },
-      });
+      const stored = await AsyncStorage.getItem('pendingNotifs');
+      const list = stored ? JSON.parse(stored) : [];
+      list.push({ type, title, body, extra, ts: Date.now() });
+      await AsyncStorage.setItem('pendingNotifs', JSON.stringify(list.slice(-20)));
     } catch {}
   }, []);
 
