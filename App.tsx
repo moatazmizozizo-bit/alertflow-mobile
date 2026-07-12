@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions,
   Animated, Platform, ScrollView, Alert, AppState, Image,
+  RefreshControl, KeyboardAvoidingView,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
@@ -165,12 +166,15 @@ export default function App() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submittedCampaigns, setSubmittedCampaigns] = useState<Set<string>>(new Set());
+  const [viewedNewsIds, setViewedNewsIds] = useState<Set<string>>(new Set());
+  const [refreshing, setRefreshing] = useState(false);
   const [connState, setConnState] = useState<'live' | 'reconnecting' | 'offline'>('live');
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
   const [pendingNotifs, setPendingNotifs] = useState<{ type: string; title: string; body: string; ts: number }[]>([]);
   const [newsRemaining, setNewsRemaining] = useState<number | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
   const localIp = useRef('0.0.0.0');
@@ -358,6 +362,7 @@ export default function App() {
     setAnswers({});
     setSurveySubmitted(false);
     setScreen('news');
+    setViewedNewsIds((prev) => new Set(prev).add(data.id));
     setNewsList((prev) => {
       if (prev.find((n) => n.id === data.id)) return prev;
       return [...prev, data];
@@ -441,10 +446,21 @@ export default function App() {
 
   useEffect(() => {
     if (screen === 'dashboard' || screen === 'alert') {
-      doHeartbeat();
-      const hb = setInterval(doHeartbeat, HBEAT_MS);
       const clk = setInterval(() => setClock(new Date()), 1000);
-      return () => { clearInterval(hb); clearInterval(clk); };
+      const scheduleNext = () => {
+        const nf = heartbeatFailRef.current;
+        const delay = nf >= 5 ? 30000 : nf >= 3 ? 15000 : nf >= 1 ? 10000 : HBEAT_MS;
+        heartbeatTimerRef.current = setTimeout(() => {
+          doHeartbeat();
+          scheduleNext();
+        }, delay);
+      };
+      doHeartbeat();
+      scheduleNext();
+      return () => {
+        if (heartbeatTimerRef.current) clearTimeout(heartbeatTimerRef.current);
+        clearInterval(clk);
+      };
     }
   }, [screen, doHeartbeat]);
 
@@ -472,7 +488,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password: password.trim() }),
       });
-      if (!res.ok) { setLoginError(`Login failed (${res.status})`); setLoggingIn(false); return; }
+      if (res.status === 401) { setLoginError('Invalid username or password.'); setLoggingIn(false); return; }
+      if (!res.ok) { setLoginError(`Login failed (${res.status}). Check credentials or server config.`); setLoggingIn(false); return; }
       const data = await res.json();
       tokenRef.current = data.accessToken;
       await AsyncStorage.multiSet([
@@ -482,7 +499,11 @@ export default function App() {
       ]);
       setLoggingIn(false);
       setScreen('dashboard');
-    } catch (e: any) { setLoginError(`Connection error: ${e.message}`); setLoggingIn(false); }
+    } catch (e: any) {
+      if (e.message?.includes('Network request failed')) setLoginError('Cannot reach server. Check the address and ensure the backend is running.');
+      else setLoginError(`Connection error: ${e.message}`);
+      setLoggingIn(false);
+    }
   }, [username, password]);
 
   const handleLogout = useCallback(() => {
@@ -504,15 +525,34 @@ export default function App() {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (tokenRef.current) headers['Authorization'] = `Bearer ${tokenRef.current}`;
       if (alert.id) {
-        await fetch(`${apiBaseRef.current}/alerts/${alert.id}/ack`, {
+        const res = await fetch(`${apiBaseRef.current}/alerts/${alert.id}/ack`, {
           method: 'POST', headers,
           body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
         });
+        if (!res.ok) { Alert.alert('Acknowledge Failed', `Server returned ${res.status}. Try again.`); return; }
       }
-    } catch {}
+    } catch (e: any) { Alert.alert('Acknowledge Failed', `Network error: ${e.message}.`); return; }
     setAlert(null);
     setScreen('dashboard');
   }, [alert]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await doHeartbeat();
+    setRefreshing(false);
+  }, [doHeartbeat]);
+
+  const showAlertDetail = useCallback((item: AlertData & { ts: Date }) => {
+    const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
+    const msg = [
+      item.code ? `Code: ${item.codeName || item.code}` : '',
+      loc ? `Location: ${loc}` : '',
+      item.message || '',
+      item.createdAt ? `At: ${new Date(item.createdAt).toLocaleString()}` : '',
+      item.codeDoc ? `\n${item.codeDoc}` : '',
+    ].filter(Boolean).join('\n');
+    Alert.alert(displayLabel(item), msg || 'No additional details.');
+  }, []);
 
   const updateAnswer = useCallback((questionId: string, value: string | string[] | number) => {
     setAnswers((prev) => ({ ...prev, [questionId]: value }));
@@ -601,7 +641,7 @@ export default function App() {
         return (
           <View key={q.id} style={styles.questionBlock}>
             <Text style={styles.questionText}>{idx + 1}. {q.text}{q.isRequired ? ' *' : ''}</Text>
-            <TextInput style={styles.textAnswer} value={String(answer || '')} onChangeText={(v) => updateAnswer(q.id, v)} placeholder="Type your answer..." placeholderTextColor="#ffffff60" multiline />
+            <TextInput style={styles.textAnswer} value={String(answer || '')} onChangeText={(v) => updateAnswer(q.id, v)} placeholder="Type your answer..." placeholderTextColor="#ffffff60" multiline maxLength={2000} />
           </View>
         );
       default: return null;
@@ -622,23 +662,26 @@ export default function App() {
   // === LOGIN ===
   if (screen === 'login') {
     return (
-      <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
-        <View style={styles.brandWrap}>
-          <View style={styles.brandIcon}>
-            <Text style={styles.brandLetters}>A<Text style={{ color: '#EF4444' }}>F</Text></Text>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
+          <View style={styles.brandWrap}>
+            <View style={styles.brandIcon}>
+              <Text style={styles.brandLetters}>A<Text style={{ color: '#EF4444' }}>F</Text></Text>
+            </View>
+            <View>
+              <Text style={styles.brandTitle}>AlertFlow</Text>
+              <Text style={styles.brandSub}>Command Center</Text>
+            </View>
           </View>
-          <View>
-            <Text style={styles.brandTitle}>AlertFlow</Text>
-            <Text style={styles.brandSub}>Command Center</Text>
-          </View>
+          <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
+          <TextInput style={styles.input} placeholder="Server address (http://ip:3000)" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
+          <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
+          <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
+          <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn} accessible={true} accessibilityLabel="Sign in" accessibilityRole="button"><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
+          {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
+          <Text style={{ color: '#ffffff20', fontSize: 11, textAlign: 'center', marginTop: 20 }}>Make sure the server address is correct and the backend is running on port 3000.</Text>
         </View>
-        <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
-        <TextInput style={styles.input} placeholder="Server address (http://ip:3000)" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
-        <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
-        <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
-        <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn}><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
-        {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
-      </View>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -708,20 +751,22 @@ export default function App() {
           ) : null}
         </ScrollView>
 
-        {/* Fixed action bar: always visible, never scrolls out of reach.
-            Acknowledge is the unmistakable primary action; Dismiss is a
-            de-emphasized secondary action so it can't be tapped by mistake. */}
         <View style={[styles.alertBtnBar, { backgroundColor: bg, borderTopColor: light ? '#00000020' : '#ffffff25' }]}>
           {!alert.isClear ? (
             <TouchableOpacity style={[styles.alertBtnPrimary, { backgroundColor: tc }]} onPress={handleAcknowledge} activeOpacity={0.85}>
               <Text style={{ color: bg, fontSize: 17, fontWeight: '800' }}>✓  Acknowledge</Text>
             </TouchableOpacity>
           ) : null}
-          <TouchableOpacity style={styles.alertBtnSecondary} onPress={() => { setAlert(null); setScreen('dashboard'); }} activeOpacity={0.6}>
-            <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>
-              {alert.isClear ? 'Dismiss' : 'Dismiss without acknowledging'}
-            </Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 12, width: '100%' }}>
+            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => { setAlert(null); setScreen('dashboard'); }} activeOpacity={0.6}>
+              <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>
+                {alert.isClear ? 'Dismiss' : 'Dismiss'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => Speech.stop()} activeOpacity={0.6}>
+              <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>✕ Stop TTS</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     );
@@ -731,6 +776,7 @@ export default function App() {
   if (screen === 'survey' && surveyData) {
     const survey = surveyData.survey;
     return (
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 40 }]}>
         <StatusBar hidden />
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 20 }}>
@@ -744,6 +790,7 @@ export default function App() {
           )}
         </ScrollView>
       </View>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -819,7 +866,7 @@ export default function App() {
                 {connState === 'live' ? 'Live' : connState === 'reconnecting' ? 'Reconnecting' : 'Offline'}
               </Text>
             </View>
-            <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>{getInitials(username)}</Text></TouchableOpacity>
+            <TouchableOpacity onPress={handleLogout} style={styles.avatar} accessible={true} accessibilityLabel="Log out" accessibilityRole="button"><Text style={styles.avatarText}>{getInitials(username)}</Text></TouchableOpacity>
           </View>
         </View>
 
@@ -862,10 +909,21 @@ export default function App() {
           })}
         </View>
 
-        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 16 }}>
+        <ScrollView
+          style={{ flex: 1, width: '100%' }}
+          contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ffffff60" />}
+        >
           {activeTab === 'alerts' && (
             <>
-              <Text style={styles.sectionTitle}>Alert History</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={styles.sectionTitle}>Alert History</Text>
+                {recentAlerts.length > 0 && (
+                  <TouchableOpacity onPress={() => setAlertHistory([])}>
+                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               {recentAlerts.length === 0 ? (
                 <View style={styles.emptyState}><Text style={styles.emptyText}>No alerts received yet</Text></View>
               ) : (
@@ -874,7 +932,7 @@ export default function App() {
                   const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
                   const bg = item.color || codeColor(item.code);
                   return (
-                    <View key={idx} style={styles.alertItem}>
+                    <TouchableOpacity key={idx} style={styles.alertItem} onPress={() => showAlertDetail(item)} activeOpacity={0.7}>
                       <View style={[styles.cardBar, { backgroundColor: bg }]} />
                       <View style={[styles.alertIconBadge, { backgroundColor: bg + '30', borderColor: bg }]}>
                         <Text style={{ fontSize: 14 }}>{codeIcon(item.code)}</Text>
@@ -884,7 +942,7 @@ export default function App() {
                         {item.message ? <Text style={styles.alertItemMeta}>{item.message}</Text> : null}
                       </View>
                       <Text style={{ color: '#ffffff40', fontSize: 11 }}>{formatTime(item.ts)}</Text>
-                    </View>
+                    </TouchableOpacity>
                   );
                 })
               )}
@@ -893,40 +951,67 @@ export default function App() {
 
           {activeTab === 'news' && (
             <>
-              <Text style={styles.sectionTitle}>News & Awareness</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={styles.sectionTitle}>News & Awareness</Text>
+                {newsList.length > 0 && (
+                  <TouchableOpacity onPress={() => setNewsList([])}>
+                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               {newsList.length === 0 ? (
                 <View style={styles.emptyState}><Text style={styles.emptyText}>No news received yet</Text></View>
               ) : (
-                newsList.map((item) => (
-                  <View key={item.id} style={styles.newsCard}>
-                    <View style={[styles.cardBar, { backgroundColor: item.type === 'card' ? '#9c27b0' : '#3a7bd5' }]} />
-                    <View style={[styles.newsTag, { backgroundColor: item.type === 'card' ? '#7b1fa240' : '#3a7bd540' }]}>
-                      <Text style={{ fontSize: 11, fontWeight: '600', color: item.type === 'card' ? '#ce93d8' : '#7bb3ff' }}>{item.type === 'card' ? 'Awareness' : 'Update'}</Text>
+                newsList.map((item) => {
+                  const viewed = viewedNewsIds.has(item.id);
+                  return (
+                    <View key={item.id} style={[styles.newsCard, { opacity: viewed ? 0.6 : 1 }]}>
+                      <View style={[styles.cardBar, { backgroundColor: item.type === 'card' ? '#9c27b0' : '#3a7bd5' }]} />
+                      <TouchableOpacity style={{ position: 'absolute', right: 6, top: 6, zIndex: 1, width: 24, height: 24, borderRadius: 12, backgroundColor: '#ffffff15', alignItems: 'center', justifyContent: 'center' }} onPress={() => removeNews(item.id)}>
+                        <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700' }}>✕</Text>
+                      </TouchableOpacity>
+                      <View style={[styles.newsTag, { backgroundColor: item.type === 'card' ? '#7b1fa240' : '#3a7bd540' }]}>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: item.type === 'card' ? '#ce93d8' : '#7bb3ff' }}>{item.type === 'card' ? 'Awareness' : 'Update'}</Text>
+                      </View>
+                      <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.title}</Text>
+                      {item.body ? <Text style={{ color: '#ffffff99', fontSize: 14, lineHeight: 20 }} numberOfLines={3}>{item.body}</Text> : null}
                     </View>
-                    <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.title}</Text>
-                    {item.body ? <Text style={{ color: '#ffffff99', fontSize: 14, lineHeight: 20 }}>{item.body}</Text> : null}
-                  </View>
-                ))
+                  );
+                })
               )}
             </>
           )}
 
           {activeTab === 'surveys' && (
             <>
-              <Text style={styles.sectionTitle}>Surveys</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={styles.sectionTitle}>Surveys</Text>
+                {surveyList.length > 0 && (
+                  <TouchableOpacity onPress={() => setSurveyList([])}>
+                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               {surveyList.length === 0 ? (
                 <View style={styles.emptyState}><Text style={styles.emptyText}>No surveys received yet</Text></View>
               ) : (
                 surveyList.map((item) => {
                   const submitted = submittedCampaigns.has(item.campaignId);
+                  const expDate = item.survey.expiresAt ? new Date(item.survey.expiresAt) : null;
+                  const expired = expDate && expDate < new Date();
                   return (
                     <View key={item.campaignId} style={styles.surveyCard}>
-                      <View style={[styles.cardBar, { backgroundColor: submitted ? '#4caf50' : '#3a7bd5' }]} />
+                      <View style={[styles.cardBar, { backgroundColor: submitted ? '#4caf50' : expired ? '#6b7280' : '#3a7bd5' }]} />
                       <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.survey.title}</Text>
                       {item.survey.description ? <Text style={{ color: '#ffffff80', fontSize: 13, marginBottom: 6 }}>{item.survey.description}</Text> : null}
-                      <Text style={{ color: '#ffffff50', fontSize: 11, marginBottom: 10 }}>{item.survey.questions.length} questions</Text>
+                      <Text style={{ color: '#ffffff50', fontSize: 11, marginBottom: 10 }}>
+                        {item.survey.questions.length} questions
+                        {expDate ? `  ·  Expires ${expDate.toLocaleDateString()}` : ''}
+                      </Text>
                       {submitted ? (
                         <Text style={{ color: '#4caf50', fontSize: 13, fontWeight: '600' }}>✓ Submitted</Text>
+                      ) : expired ? (
+                        <Text style={{ color: '#6b7280', fontSize: 13, fontWeight: '600' }}>Expired</Text>
                       ) : (
                         <TouchableOpacity style={styles.fillBtn} onPress={() => showSurveyScreen(item)}>
                           <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>Fill Survey</Text>
@@ -938,11 +1023,12 @@ export default function App() {
               )}
             </>
           )}
+
+          {activeTab === 'alerts' && <Text style={{ color: '#ffffff30', fontSize: 11, textAlign: 'center', marginTop: 20 }}>AlertFlow Mobile v1.0.0</Text>}
         </ScrollView>
       </View>
     );
   }
-
   return null;
 }
 
