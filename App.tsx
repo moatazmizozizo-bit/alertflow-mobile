@@ -9,13 +9,15 @@ import * as Speech from 'expo-speech';
 import { createAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import iconPng from './assets/alertflow-icon.png';
 import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
+import { log } from './src/utils/log';
 
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
-const ALERT_DISPLAY_MS = 30000;
 const AUTH_TOKEN_KEY = 'authToken';
+const SECURE_AUTH_TOKEN_KEY = 'secure_authToken';
 const AUTH_USERNAME_KEY = 'authUsername';
 const AUTH_SAVED_AT_KEY = 'authSavedAt';
 const HISTORY_ALERTS_KEY = 'history_alerts';
@@ -24,6 +26,7 @@ const HISTORY_SURVEYS_KEY = 'history_surveys';
 const HISTORY_SUBMITTED_KEY = 'history_submitted_campaigns';
 const SETTINGS_KEY = 'user_settings';
 const ACKED_KEY = 'acknowledged_alerts';
+const PENDING_ACKS_KEY = 'pending_ack_retries';
 
 type AlertData = {
   id?: string;
@@ -78,6 +81,7 @@ type NewsData = {
   opacity: number; backgroundColor: string | null; textColor: string | null;
 };
 
+type PendingAck = { alertId: string; ts: number; alertData?: AlertData };
 type AnswerMap = Record<string, string | string[] | number>;
 
 const CODE_COLORS: Record<string, string> = {
@@ -144,9 +148,9 @@ function getDeviceId(): string {
 }
 
 async function loadDeviceId(): Promise<string> {
-  try { const stored = await AsyncStorage.getItem('deviceId'); if (stored) return stored; } catch {}
+  try { const stored = await AsyncStorage.getItem('deviceId'); if (stored) return stored; } catch { log.warn('Failed to read deviceId from storage'); }
   const id = getDeviceId();
-  try { await AsyncStorage.setItem('deviceId', id); } catch {}
+  try { await AsyncStorage.setItem('deviceId', id); } catch { log.warn('Failed to write deviceId to storage'); }
   return id;
 }
 
@@ -164,12 +168,42 @@ function luminance(hex: string): number {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
+function isValidAlertPayload(v: unknown): v is AlertData {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string' || typeof o.code === 'string' || typeof o.message === 'string';
+}
+
+function isValidSurveyPayload(v: unknown): v is SurveyData {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.campaignId === 'string' && !!o.survey && typeof (o.survey as Record<string, unknown>)?.id === 'string';
+}
+
+function isValidNewsPayload(v: unknown): v is NewsData {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string' && typeof o.title === 'string';
+}
+
+async function getSecureToken(): Promise<string | null> {
+  try { return await SecureStore.getItemAsync(SECURE_AUTH_TOKEN_KEY); } catch { return null; }
+}
+
+async function setSecureToken(token: string): Promise<void> {
+  try { await SecureStore.setItemAsync(SECURE_AUTH_TOKEN_KEY, token); } catch { log.warn('Failed to save token to SecureStore'); }
+}
+
+async function removeSecureToken(): Promise<void> {
+  try { await SecureStore.deleteItemAsync(SECURE_AUTH_TOKEN_KEY); } catch { log.warn('Failed to remove token from SecureStore'); }
+}
+
 export default function App() {
   const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
-  const [serverInput, setServerInput] = useState('http://192.168.1.100:3000');
+  const [serverInput, setServerInput] = useState('');
   const [alert, setAlert] = useState<AlertData | null>(null);
   const [surveyData, setSurveyData] = useState<SurveyData | null>(null);
   const [answers, setAnswers] = useState<AnswerMap>({});
@@ -186,6 +220,7 @@ export default function App() {
   const [submittedCampaigns, setSubmittedCampaigns] = useState<Set<string>>(new Set());
   const [viewedNewsIds, setViewedNewsIds] = useState<Set<string>>(new Set());
   const [acknowledgedAlertIds, setAcknowledgedAlertIds] = useState<Set<string>>(new Set());
+  const [pendingAcks, setPendingAcks] = useState<PendingAck[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showCodeRef, setShowCodeRef] = useState(false);
@@ -225,11 +260,18 @@ export default function App() {
       } catch (e: any) { setStatus(`Discovery: ${e.message}`); }
 
       try {
-        const [savedToken, savedUsername, savedAtStr] = await Promise.all([
-          AsyncStorage.getItem(AUTH_TOKEN_KEY),
-          AsyncStorage.getItem(AUTH_USERNAME_KEY),
-          AsyncStorage.getItem(AUTH_SAVED_AT_KEY),
-        ]);
+        let savedToken = await getSecureToken();
+        // Migrate legacy AsyncStorage token to SecureStore if present
+        if (!savedToken) {
+          const legacyToken = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
+          if (legacyToken) {
+            await setSecureToken(legacyToken);
+            await AsyncStorage.removeItem(AUTH_TOKEN_KEY);
+            savedToken = legacyToken;
+          }
+        }
+        const savedUsername = await AsyncStorage.getItem(AUTH_USERNAME_KEY);
+        const savedAtStr = await AsyncStorage.getItem(AUTH_SAVED_AT_KEY);
         if (savedToken && savedUsername) {
           const savedAt = savedAtStr ? parseInt(savedAtStr, 10) : 0;
           const maxAge = 30 * 24 * 60 * 60 * 1000;
@@ -241,7 +283,7 @@ export default function App() {
             return;
           }
         }
-      } catch {}
+      } catch { log.warn('Failed to load saved auth token'); }
 
       try {
         const [alertsJson, newsJson, surveysJson, submittedJson] = await Promise.all([
@@ -257,7 +299,7 @@ export default function App() {
         if (newsJson) setNewsList(JSON.parse(newsJson));
         if (surveysJson) setSurveyList(JSON.parse(surveysJson));
         if (submittedJson) setSubmittedCampaigns(new Set(JSON.parse(submittedJson)));
-      } catch {}
+      } catch { log.warn('Failed to load history from storage'); }
       try {
         const [ackedJson, settingsJson] = await Promise.all([
           AsyncStorage.getItem(ACKED_KEY),
@@ -269,15 +311,19 @@ export default function App() {
             const s = JSON.parse(settingsJson);
             if (typeof s.voiceToggle === 'boolean') setVoiceToggle(s.voiceToggle);
             if (typeof s.volumeLevel === 'number') setVolumeLevel(s.volumeLevel);
-          } catch {}
+          } catch { log.warn('Failed to parse settings from storage'); }
         }
-      } catch {}
+      } catch { log.warn('Failed to load acked/settings from storage'); }
+      try {
+        const pendingJson = await AsyncStorage.getItem(PENDING_ACKS_KEY);
+        if (pendingJson) setPendingAcks(JSON.parse(pendingJson));
+      } catch { log.warn('Failed to load pending acks from storage'); }
       await loadPendingNotifs();
 
       try {
         const player = createAudioPlayer(require('./assets/beep.wav'));
         soundPlayerRef.current = player;
-      } catch {}
+      } catch { log.warn('Failed to create audio player'); }
 
       setScreen('login');
     })();
@@ -295,35 +341,39 @@ export default function App() {
         newsIntervalRef.current = null;
       }
       if (soundPlayerRef.current) {
-        try { soundPlayerRef.current.remove(); } catch {}
+        try { soundPlayerRef.current.remove(); } catch { log.warn('Failed to remove sound player'); }
         soundPlayerRef.current = null;
       }
     };
   }, []);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(HISTORY_ALERTS_KEY, JSON.stringify(alertHistory)); } catch {}
+    try { AsyncStorage.setItem(HISTORY_ALERTS_KEY, JSON.stringify(alertHistory)); } catch { log.warn('Failed to persist alert history'); }
   }, [alertHistory]);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(HISTORY_NEWS_KEY, JSON.stringify(newsList)); } catch {}
+    try { AsyncStorage.setItem(HISTORY_NEWS_KEY, JSON.stringify(newsList)); } catch { log.warn('Failed to persist news list'); }
   }, [newsList]);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(HISTORY_SURVEYS_KEY, JSON.stringify(surveyList)); } catch {}
+    try { AsyncStorage.setItem(HISTORY_SURVEYS_KEY, JSON.stringify(surveyList)); } catch { log.warn('Failed to persist survey list'); }
   }, [surveyList]);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(HISTORY_SUBMITTED_KEY, JSON.stringify([...submittedCampaigns])); } catch {}
+    try { AsyncStorage.setItem(HISTORY_SUBMITTED_KEY, JSON.stringify([...submittedCampaigns])); } catch { log.warn('Failed to persist submitted campaigns'); }
   }, [submittedCampaigns]);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(ACKED_KEY, JSON.stringify([...acknowledgedAlertIds])); } catch {}
+    try { AsyncStorage.setItem(ACKED_KEY, JSON.stringify([...acknowledgedAlertIds])); } catch { log.warn('Failed to persist acknowledged alerts'); }
   }, [acknowledgedAlertIds]);
 
   useEffect(() => {
-    try { AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ voiceToggle, volumeLevel })); } catch {}
+    try { AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ voiceToggle, volumeLevel })); } catch { log.warn('Failed to persist settings'); }
   }, [voiceToggle, volumeLevel]);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(PENDING_ACKS_KEY, JSON.stringify(pendingAcks)); } catch { log.warn('Failed to persist pending acks'); }
+  }, [pendingAcks]);
 
   const playAlertSound = useCallback(async () => {
     try {
@@ -332,8 +382,8 @@ export default function App() {
         player.volume = volumeLevel / 100;
         player.play();
       }
-    } catch {}
-    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); } catch {}
+    } catch { log.warn('Audio play failed'); }
+    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); } catch { log.warn('Haptic impact failed'); }
   }, [volumeLevel]);
 
   const speakRepeated = useCallback(async (text: string, rate: number, pitch: number, volume: number) => {
@@ -351,19 +401,19 @@ export default function App() {
       const list = stored ? JSON.parse(stored) : [];
       list.push({ type, title, body, extra, ts: Date.now() });
       await AsyncStorage.setItem('pendingNotifs', JSON.stringify(list.slice(-20)));
-    } catch {}
+    } catch { log.warn('Failed to schedule notification'); }
   }, []);
 
   const loadPendingNotifs = useCallback(async () => {
     try {
       const stored = await AsyncStorage.getItem('pendingNotifs');
       setPendingNotifs(stored ? JSON.parse(stored) : []);
-    } catch {}
+    } catch { log.warn('Failed to load pending notifications'); }
   }, []);
 
   const dismissPendingNotifs = useCallback(async () => {
     setPendingNotifs([]);
-    try { await AsyncStorage.setItem('pendingNotifs', JSON.stringify([])); } catch {}
+    try { await AsyncStorage.setItem('pendingNotifs', JSON.stringify([])); } catch { log.warn('Failed to dismiss pending notifications'); }
   }, []);
 
   const cancelNewsTimer = useCallback(() => {
@@ -451,6 +501,41 @@ export default function App() {
     setScreen('dashboard');
   }, [cancelNewsTimer]);
 
+  const retryPendingAcks = useCallback(async () => {
+    if (pendingAcks.length === 0) return;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (tokenRef.current) headers['Authorization'] = `Bearer ${tokenRef.current}`;
+    const remaining: PendingAck[] = [];
+    for (const pa of pendingAcks) {
+      try {
+        const res = await fetch(`${apiBaseRef.current}/alerts/${pa.alertId}/ack`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
+        });
+        if (res.ok) {
+          log.info('Retried ack succeeded for alert', pa.alertId);
+        } else {
+          remaining.push(pa);
+        }
+      } catch {
+        log.warn('Retry ack fetch failed for', pa.alertId);
+        remaining.push(pa);
+      }
+    }
+    setPendingAcks(remaining);
+    try { await AsyncStorage.setItem(PENDING_ACKS_KEY, JSON.stringify(remaining)); } catch { log.warn('Failed to persist pending ack retries'); }
+  }, [pendingAcks]);
+
+  const handleUnauthorized = useCallback(() => {
+    tokenRef.current = null;
+    setUsername('');
+    setPassword('');
+    setLoginError('Your session expired — please sign in again.');
+    removeSecureToken();
+    AsyncStorage.multiRemove([AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
+    setScreen('login');
+  }, []);
+
   const doHeartbeat = useCallback(async () => {
     const ip = await getLocalIp();
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -470,26 +555,31 @@ export default function App() {
         heartbeatFailRef.current = 0;
         setLastHeartbeatAt(Date.now());
         setConnState('live');
+        retryPendingAcks();
         const data = await res.json();
         if (data.commands && Array.isArray(data.commands)) {
           const isBg = appStateRef.current === 'background' || appStateRef.current === 'inactive';
           for (const cmd of data.commands) {
             const payload = cmd.data?.type === cmd.type ? cmd.data.data : cmd.data;
-            if (cmd.type === 'alert' && payload) {
+            if (cmd.type === 'alert') {
+              if (!isValidAlertPayload(payload)) { log.warn('Invalid alert payload, skipping'); continue; }
               if (isBg) {
                 scheduleNotif('alert', `⚠️ ${displayLabel(payload)}`, payload.message || 'Alert received', { alertData: JSON.stringify(payload) });
               } else {
                 showAlert(payload);
               }
-            } else if (cmd.type === 'alert-clear' && payload) {
+            } else if (cmd.type === 'alert-clear') {
+              if (!isValidAlertPayload(payload)) { log.warn('Invalid alert-clear payload, skipping'); continue; }
               if (!isBg) showAlert({ ...payload, isClear: true });
-            } else if (cmd.type === 'survey-campaign' && payload) {
+            } else if (cmd.type === 'survey-campaign') {
+              if (!isValidSurveyPayload(payload)) { log.warn('Invalid survey payload, skipping'); continue; }
               if (isBg) {
                 scheduleNotif('survey', '📋 New Survey', payload.survey?.title || 'Survey available', { surveyData: JSON.stringify(payload) });
               } else {
                 showSurveyScreen(payload);
               }
-            } else if (cmd.type === 'it-news-update' && payload) {
+            } else if (cmd.type === 'it-news-update') {
+              if (!isValidNewsPayload(payload)) { log.warn('Invalid news payload, skipping'); continue; }
               if (isBg) {
                 scheduleNotif('news', '📰 ' + (payload.title || ''), payload.body || '', { newsData: JSON.stringify(payload) });
               } else {
@@ -500,15 +590,20 @@ export default function App() {
             }
           }
         }
+      } else if (res.status === 401) {
+        log.warn('Heartbeat returned 401, session expired');
+        handleUnauthorized();
+        return;
       } else {
         heartbeatFailRef.current += 1;
         setConnState(heartbeatFailRef.current >= 2 ? 'offline' : 'reconnecting');
       }
     } catch {
+      log.warn('Heartbeat fetch failed');
       heartbeatFailRef.current += 1;
       setConnState(heartbeatFailRef.current >= 2 ? 'offline' : 'reconnecting');
     }
-  }, [showAlert, showSurveyScreen, showNewsScreen, removeNews, scheduleNotif]);
+  }, [showAlert, showSurveyScreen, showNewsScreen, removeNews, scheduleNotif, retryPendingAcks, handleUnauthorized]);
 
   useEffect(() => {
     if (screen === 'dashboard' || screen === 'alert') {
@@ -546,9 +641,10 @@ export default function App() {
     setLoggingIn(true);
     if (!username.trim() || !password.trim()) { setLoginError('Username and password required'); setLoggingIn(false); return; }
     try {
-      const base = serverInput.trim().replace(/\/+$/, '');
+      const base = serverInput.trim().replace(/\/+$/, '') || apiBaseRef.current;
+      if (!base) { setLoginError('Server address is required. Enter it manually or ensure auto-discovery works.'); setLoggingIn(false); return; }
       apiBaseRef.current = base;
-      await saveApiBase(base);
+      if (serverInput.trim()) await saveApiBase(base);
       const res = await fetch(`${apiBaseRef.current}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -558,8 +654,8 @@ export default function App() {
       if (!res.ok) { setLoginError(`Login failed (${res.status}). Check credentials or server config.`); setLoggingIn(false); return; }
       const data = await res.json();
       tokenRef.current = data.accessToken;
+      await setSecureToken(data.accessToken);
       await AsyncStorage.multiSet([
-        [AUTH_TOKEN_KEY, data.accessToken],
         [AUTH_USERNAME_KEY, username.trim()],
         [AUTH_SAVED_AT_KEY, String(Date.now())],
       ]);
@@ -579,7 +675,8 @@ export default function App() {
         tokenRef.current = null;
         setUsername('');
         setPassword('');
-        await AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
+        await removeSecureToken();
+        await AsyncStorage.multiRemove([AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
         setScreen('login');
       }},
     ]);
@@ -587,26 +684,43 @@ export default function App() {
 
   const handleAcknowledge = useCallback(async () => {
     if (!alert) { setAlert(null); setScreen('dashboard'); return; }
+    const ackedId = alert.id;
+    if (ackedId) {
+      setAcknowledgedAlertIds((prev) => new Set(prev).add(ackedId));
+    }
+    try { await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch { log.warn('Haptic notification failed'); }
+    setAckOverlay(true);
+    await new Promise((r) => setTimeout(r, 700));
+    setAckOverlay(false);
+    setAlert(null);
+    setScreen('dashboard');
+
+    if (!ackedId) return;
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (tokenRef.current) headers['Authorization'] = `Bearer ${tokenRef.current}`;
-      if (alert.id) {
-        const res = await fetch(`${apiBaseRef.current}/alerts/${alert.id}/ack`, {
-          method: 'POST', headers,
-          body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
-        });
-        if (!res.ok) { Alert.alert('Acknowledge Failed', `Server returned ${res.status}. Try again.`); return; }
+      const res = await fetch(`${apiBaseRef.current}/alerts/${ackedId}/ack`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          log.warn('Ack POST returned 401, session expired');
+          handleUnauthorized();
+          return;
+        }
+        log.warn('Ack POST failed, queuing retry for', ackedId, 'status', res.status);
+        const newPending = [...pendingAcks, { alertId: ackedId, ts: Date.now() }];
+        setPendingAcks(newPending);
+        try { await AsyncStorage.setItem(PENDING_ACKS_KEY, JSON.stringify(newPending)); } catch { log.warn('Failed to persist pending ack'); }
       }
-      const ackedId = alert.id;
-      if (ackedId) setAcknowledgedAlertIds((prev) => new Set(prev).add(ackedId));
-      try { await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
-      setAckOverlay(true);
-      await new Promise((r) => setTimeout(r, 700));
-      setAckOverlay(false);
-    } catch (e: any) { Alert.alert('Acknowledge Failed', `Network error: ${e.message}.`); return; }
-    setAlert(null);
-    setScreen('dashboard');
-  }, [alert]);
+    } catch {
+      log.warn('Ack network error, queuing retry for', ackedId);
+      const newPending = [...pendingAcks, { alertId: ackedId, ts: Date.now() }];
+      setPendingAcks(newPending);
+      try { await AsyncStorage.setItem(PENDING_ACKS_KEY, JSON.stringify(newPending)); } catch { log.warn('Failed to persist pending ack'); }
+    }
+  }, [alert, pendingAcks]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -663,7 +777,14 @@ export default function App() {
         method: 'POST', headers,
         body: JSON.stringify({ surveyId: surveyData.survey.id, campaignId: surveyData.campaignId, answers: formatted, deviceId: deviceId.current }),
       });
-      if (!res.ok) { Alert.alert('Submission Failed', `Server returned ${res.status}. Please try again.`); setSubmitting(false); return; }
+      if (!res.ok) {
+        if (res.status === 401) {
+          handleUnauthorized();
+          setSubmitting(false);
+          return;
+        }
+        Alert.alert('Submission Failed', `Server returned ${res.status}. Please try again.`); setSubmitting(false); return;
+      }
     } catch (e: any) { Alert.alert('Submission Failed', `Network error: ${e.message}`); setSubmitting(false); return; }
     setSubmittedCampaigns((prev) => new Set(prev).add(surveyData.campaignId));
     setSurveySubmitted(true);
@@ -735,7 +856,7 @@ export default function App() {
           <View key={q.id} style={styles.questionBlock}>
             <Text style={styles.questionText}>{idx + 1}. {q.text}{q.isRequired ? ' *' : ''}</Text>
             <TextInput style={styles.textAnswer} value={String(answer || '')} onChangeText={(v) => updateAnswer(q.id, v)} placeholder="Type your answer..." placeholderTextColor="#ffffff60" multiline maxLength={2000} />
-            <Text style={{ color: '#ffffff40', fontSize: 11, textAlign: 'right', marginTop: 4 }}>{String(answer || '').length}/2000</Text>
+            <Text style={{ color: '#ffffff70', fontSize: 11, textAlign: 'right', marginTop: 4 }}>{String(answer || '').length}/2000</Text>
           </View>
         );
       default: return null;
@@ -768,13 +889,13 @@ export default function App() {
             </View>
           </View>
           <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
-          <TextInput style={styles.input} placeholder="http://192.168.1.x:3000" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
-          <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
-          <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
+          <TextInput style={styles.input} placeholder="http://192.168.1.x:3000" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" accessibilityLabel="Server address" />
+          <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" accessibilityLabel="Username" />
+          <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry accessibilityLabel="Password" />
           <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn} accessible={true} accessibilityLabel="Sign in" accessibilityRole="button"><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
           {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
-          <TouchableOpacity onPress={() => setShowAdvanced((p) => !p)} style={{ marginTop: 8 }}>
-            <Text style={{ color: '#ffffff40', fontSize: 12, fontWeight: '600' }}>{showAdvanced ? '▾ Advanced' : '▸ Advanced'}</Text>
+          <TouchableOpacity onPress={() => setShowAdvanced((p) => !p)} style={{ marginTop: 8 }} accessible={true} accessibilityLabel="Toggle advanced settings" accessibilityRole="button">
+            <Text style={{ color: '#ffffff70', fontSize: 12, fontWeight: '600' }}>{showAdvanced ? '▾ Advanced' : '▸ Advanced'}</Text>
           </TouchableOpacity>
           {showAdvanced && (
             <View style={{ width: '100%', maxWidth: 400, marginTop: 4, padding: 12, backgroundColor: '#ffffff08', borderRadius: 8 }}>
@@ -856,17 +977,17 @@ export default function App() {
 
         <View style={[styles.alertBtnBar, { backgroundColor: bg, borderTopColor: light ? '#00000020' : '#ffffff25' }]}>
           {!alert.isClear ? (
-            <TouchableOpacity style={[styles.alertBtnPrimary, { backgroundColor: tc }]} onPress={handleAcknowledge} activeOpacity={0.85}>
+            <TouchableOpacity style={[styles.alertBtnPrimary, { backgroundColor: tc }]} onPress={handleAcknowledge} activeOpacity={0.85} accessible={true} accessibilityLabel="Acknowledge alert" accessibilityRole="button">
               <Text style={{ color: bg, fontSize: 17, fontWeight: '800' }}>✓  Acknowledge</Text>
             </TouchableOpacity>
           ) : null}
           <View style={{ flexDirection: 'row', gap: 12, width: '100%' }}>
-            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => { setAlert(null); setScreen('dashboard'); }} activeOpacity={0.6}>
+            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => { setAlert(null); setScreen('dashboard'); }} activeOpacity={0.6} accessible={true} accessibilityLabel="Dismiss alert" accessibilityRole="button">
               <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>
                 {alert.isClear ? 'Dismiss' : 'Dismiss'}
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => Speech.stop()} activeOpacity={0.6}>
+            <TouchableOpacity style={{ flex: 1, paddingVertical: 10, alignItems: 'center' }} onPress={() => Speech.stop()} activeOpacity={0.6} accessible={true} accessibilityLabel="Stop voice announcement" accessibilityRole="button">
               <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>✕ Stop TTS</Text>
             </TouchableOpacity>
           </View>
@@ -957,7 +1078,7 @@ export default function App() {
             </View>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <TouchableOpacity onPress={() => setShowCodeRef(true)} style={{ paddingHorizontal: 6, paddingVertical: 4 }}>
+            <TouchableOpacity onPress={() => setShowCodeRef(true)} style={{ paddingHorizontal: 6, paddingVertical: 4 }} accessible={true} accessibilityLabel="Code reference" accessibilityRole="button">
               <Text style={{ fontSize: 18 }}>📖</Text>
             </TouchableOpacity>
             <View style={[
@@ -1013,6 +1134,17 @@ export default function App() {
           </View>
         )}
 
+        {pendingAcks.length > 0 && (
+          <View style={[styles.pendingBanner, { borderColor: '#f59e0b40', backgroundColor: '#f59e0b1a' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ color: '#fbbf24', fontSize: 14 }}>⏳</Text>
+              <Text style={{ color: '#fcd34d', fontSize: 13, fontWeight: '600' }}>
+                {pendingAcks.length} acknowledgment{pendingAcks.length > 1 ? 's' : ''} pending retry
+              </Text>
+            </View>
+          </View>
+        )}
+
         <View style={styles.tabBar}>
           {(['alerts', 'news', 'surveys'] as const).map((t) => {
             const tabIcon = t === 'alerts' ? '⚠️' : t === 'news' ? '📰' : '📋';
@@ -1060,7 +1192,7 @@ export default function App() {
                         <Text style={[styles.alertItemTitle, acked && { fontWeight: '400', color: '#ffffff99' }]}>{title}</Text>
                         {item.message ? <Text style={styles.alertItemMeta}>{item.message}</Text> : null}
                       </View>
-                      <Text style={{ color: '#ffffff40', fontSize: 11 }}>{formatTime(item.ts)}</Text>
+                      <Text style={{ color: '#ffffff70', fontSize: 11 }}>{formatTime(item.ts)}</Text>
                     </TouchableOpacity>
                   );
                 })
@@ -1187,6 +1319,8 @@ export default function App() {
                 <TouchableOpacity onPress={() => { setShowSettings(false); handleLogout(); }} style={{ width: '100%', paddingVertical: 14, borderRadius: 12, backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440', alignItems: 'center' }}>
                   <Text style={{ color: '#ef4444', fontSize: 16, fontWeight: '700' }}>Log Out</Text>
                 </TouchableOpacity>
+
+                <Text style={{ color: '#ffffff30', fontSize: 11, textAlign: 'center', marginTop: 24 }}>AlertFlow Mobile v1.0.0</Text>
               </View>
             </View>
           </KeyboardAvoidingView>
@@ -1296,5 +1430,5 @@ const styles = StyleSheet.create({
   submitBtn: { width: '100%', padding: 14, borderRadius: 8, backgroundColor: '#4caf50', alignItems: 'center', marginTop: 10 },
   submitBtnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   emptyState: { alignItems: 'center', paddingVertical: 50 },
-  emptyText: { color: '#ffffff50', fontSize: 14 },
+  emptyText: { color: '#ffffff70', fontSize: 14 },
 });

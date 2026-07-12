@@ -1,7 +1,13 @@
 import * as Network from 'expo-network';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+const PREFIX = '[AlertFlow]';
+const log = { warn: (...args: unknown[]) => console.warn(PREFIX, ...args) };
+
 const MANUAL_KEY = 'backendBase';
+const CACHED_DISCOVERED_IP_KEY = 'discoveredBackendIp';
+const CACHED_DISCOVERED_TS_KEY = 'discoveredBackendIpTs';
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const HEALTH_PATH = '/health';
 
 let _cachedBackendIp: string | null = null;
@@ -12,6 +18,7 @@ export async function getLocalIp(): Promise<string> {
     const ip = await Network.getIpAddressAsync();
     return ip || '0.0.0.0';
   } catch {
+    log.warn('getLocalIp failed');
     return '0.0.0.0';
   }
 }
@@ -21,6 +28,7 @@ export async function getManualBackend(): Promise<string | null> {
     const v = await AsyncStorage.getItem(MANUAL_KEY);
     return v && v.trim() ? v.trim().replace(/\/+$/, '') : null;
   } catch {
+    log.warn('getManualBackend read failed');
     return null;
   }
 }
@@ -30,7 +38,7 @@ export async function setManualBackend(base: string): Promise<void> {
     const v = (base || '').trim().replace(/\/+$/, '');
     if (v) await AsyncStorage.setItem(MANUAL_KEY, v);
     else await AsyncStorage.removeItem(MANUAL_KEY);
-  } catch {}
+  } catch { log.warn('setManualBackend write failed'); }
 }
 
 function probeIp(ip: string, port: string, timeoutMs: number): Promise<boolean> {
@@ -46,6 +54,7 @@ function probeIp(ip: string, port: string, timeoutMs: number): Promise<boolean> 
 
 export async function discoverBackendIp(): Promise<string> {
   if (_cachedBackendIp) return _cachedBackendIp;
+
   const localIp = await getLocalIp();
   const parts = localIp.split('.');
   const port = process.env.EXPO_PUBLIC_BACKEND_PORT || '3000';
@@ -56,6 +65,20 @@ export async function discoverBackendIp(): Promise<string> {
   }
 
   const subnet = `${parts[0]}.${parts[1]}.${parts[2]}.`;
+
+  // Try disk-cached IP first with a single fast probe
+  try {
+    const cachedIp = await AsyncStorage.getItem(CACHED_DISCOVERED_IP_KEY);
+    const cachedTs = await AsyncStorage.getItem(CACHED_DISCOVERED_TS_KEY);
+    if (cachedIp && cachedTs && (Date.now() - parseInt(cachedTs, 10) < CACHE_TTL_MS)) {
+      const ok = await probeIp(cachedIp, port, 700);
+      if (ok) {
+        _cachedBackendIp = cachedIp;
+        return _cachedBackendIp;
+      }
+    }
+  } catch { log.warn('Failed to read cached backend IP'); }
+
   const myPart = parseInt(parts[3], 10);
   const configuredPart = process.env.EXPO_PUBLIC_BACKEND_IP_PART;
 
@@ -85,6 +108,10 @@ export async function discoverBackendIp(): Promise<string> {
     const idx = results.indexOf(true);
     if (idx !== -1) {
       _cachedBackendIp = batch[idx];
+      try {
+        await AsyncStorage.setItem(CACHED_DISCOVERED_IP_KEY, _cachedBackendIp);
+        await AsyncStorage.setItem(CACHED_DISCOVERED_TS_KEY, String(Date.now()));
+      } catch { log.warn('Failed to cache discovered backend IP'); }
       return _cachedBackendIp;
     }
   }
@@ -115,4 +142,8 @@ export async function saveApiBase(base: string): Promise<void> {
 export function resetBackendIp() {
   _cachedBackendIp = null;
   _cachedBase = null;
+  try {
+    AsyncStorage.removeItem(CACHED_DISCOVERED_IP_KEY);
+    AsyncStorage.removeItem(CACHED_DISCOVERED_TS_KEY);
+  } catch { log.warn('Failed to clear cached backend IP'); }
 }
