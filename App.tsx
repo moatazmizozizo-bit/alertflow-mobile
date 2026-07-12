@@ -88,6 +88,20 @@ function codeColor(code?: string): string {
   return CODE_COLORS[code] || '#d32f2f';
 }
 
+// Icon redundancy for severity: color alone is not accessible (colorblindness,
+// low-light wall displays), so every code also gets a distinct glyph.
+const CODE_ICONS: Record<string, string> = {
+  CODE_RED: '🔥', CODE_BLUE: '✚', CODE_YELLOW: '⚠️',
+  CODE_ORANGE: '☣️', CODE_GREEN: '🏃', CODE_PURPLE: '🧒',
+  CODE_PINK: '👶', CODE_WHITE: '🧍', CODE_BLACK: '💣',
+  CODE_GRAY: '🛡️', CODE_SILVER: '🚨', CODE_BROWN: '🌪️',
+};
+
+function codeIcon(code?: string): string {
+  if (!code) return '🚨';
+  return CODE_ICONS[code] || '🚨';
+}
+
 function displayLabel(data: AlertData): string {
   if (data.label) return data.label;
   if (data.code) return data.code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -151,6 +165,12 @@ export default function App() {
   const [loggingIn, setLoggingIn] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submittedCampaigns, setSubmittedCampaigns] = useState<Set<string>>(new Set());
+  const [connState, setConnState] = useState<'live' | 'reconnecting' | 'offline'>('live');
+  const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
+  const [pendingNotifs, setPendingNotifs] = useState<{ type: string; title: string; body: string; ts: number }[]>([]);
+  const [newsRemaining, setNewsRemaining] = useState<number | null>(null);
+  const heartbeatFailRef = useRef(0);
+  const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
   const localIp = useRef('0.0.0.0');
@@ -207,6 +227,7 @@ export default function App() {
         if (surveysJson) setSurveyList(JSON.parse(surveysJson));
         if (submittedJson) setSubmittedCampaigns(new Set(JSON.parse(submittedJson)));
       } catch {}
+      await loadPendingNotifs();
 
       setScreen('login');
     })();
@@ -218,6 +239,10 @@ export default function App() {
       if (surveySubmitTimerRef.current) {
         clearTimeout(surveySubmitTimerRef.current);
         surveySubmitTimerRef.current = null;
+      }
+      if (newsIntervalRef.current) {
+        clearInterval(newsIntervalRef.current);
+        newsIntervalRef.current = null;
       }
     };
   }, []);
@@ -259,11 +284,28 @@ export default function App() {
     } catch {}
   }, []);
 
+  const loadPendingNotifs = useCallback(async () => {
+    try {
+      const stored = await AsyncStorage.getItem('pendingNotifs');
+      setPendingNotifs(stored ? JSON.parse(stored) : []);
+    } catch {}
+  }, []);
+
+  const dismissPendingNotifs = useCallback(async () => {
+    setPendingNotifs([]);
+    try { await AsyncStorage.setItem('pendingNotifs', JSON.stringify([])); } catch {}
+  }, []);
+
   const cancelNewsTimer = useCallback(() => {
     if (newsTimerRef.current) {
       clearTimeout(newsTimerRef.current);
       newsTimerRef.current = null;
     }
+    if (newsIntervalRef.current) {
+      clearInterval(newsIntervalRef.current);
+      newsIntervalRef.current = null;
+    }
+    setNewsRemaining(null);
   }, []);
 
   const showAlert = useCallback((data: AlertData) => {
@@ -320,17 +362,23 @@ export default function App() {
       if (prev.find((n) => n.id === data.id)) return prev;
       return [...prev, data];
     });
+    const total = data.durationSec || 10;
+    setNewsRemaining(total);
+    newsIntervalRef.current = setInterval(() => {
+      setNewsRemaining((prev) => (prev !== null && prev > 0 ? prev - 1 : 0));
+    }, 1000);
     newsTimerRef.current = setTimeout(() => {
       setNewsData((prev) => prev?.id === data.id ? null : prev);
       setScreen('dashboard');
-    }, (data.durationSec || 10) * 1000);
+    }, total * 1000);
   }, []);
 
   const removeNews = useCallback((id: string) => {
+    cancelNewsTimer();
     setNewsData((prev) => prev?.id === id ? null : prev);
     setNewsList((prev) => prev.filter((n) => n.id !== id));
     setScreen('dashboard');
-  }, []);
+  }, [cancelNewsTimer]);
 
   const doHeartbeat = useCallback(async () => {
     const ip = await getLocalIp();
@@ -348,6 +396,9 @@ export default function App() {
         }),
       });
       if (res.ok) {
+        heartbeatFailRef.current = 0;
+        setLastHeartbeatAt(Date.now());
+        setConnState('live');
         const data = await res.json();
         if (data.commands && Array.isArray(data.commands)) {
           const isBg = appStateRef.current === 'background' || appStateRef.current === 'inactive';
@@ -378,8 +429,14 @@ export default function App() {
             }
           }
         }
+      } else {
+        heartbeatFailRef.current += 1;
+        setConnState(heartbeatFailRef.current >= 2 ? 'offline' : 'reconnecting');
       }
-    } catch {}
+    } catch {
+      heartbeatFailRef.current += 1;
+      setConnState(heartbeatFailRef.current >= 2 ? 'offline' : 'reconnecting');
+    }
   }, [showAlert, showSurveyScreen, showNewsScreen, removeNews, scheduleNotif]);
 
   useEffect(() => {
@@ -395,11 +452,12 @@ export default function App() {
     const sub = AppState.addEventListener('change', (nextState) => {
       if (appStateRef.current.match(/inactive|background/) && nextState === 'active') {
         doHeartbeat();
+        loadPendingNotifs();
       }
       appStateRef.current = nextState;
     });
     return () => sub.remove();
-  }, [showAlert, showNewsScreen, showSurveyScreen, doHeartbeat]);
+  }, [showAlert, showNewsScreen, showSurveyScreen, doHeartbeat, loadPendingNotifs]);
 
   const handleUserLogin = useCallback(async () => {
     setLoginError('');
@@ -506,7 +564,7 @@ export default function App() {
           <View key={q.id} style={styles.questionBlock}>
             <Text style={styles.questionText}>{idx + 1}. {q.text}{q.isRequired ? ' *' : ''}</Text>
             {(q.options || []).map((opt) => (
-              <TouchableOpacity key={opt} style={[styles.choiceBtn, answer === opt && styles.choiceSelected]} onPress={() => updateAnswer(q.id, opt)}><Text style={styles.choiceText}>{opt}</Text></TouchableOpacity>
+              <TouchableOpacity key={opt} style={[styles.choiceBtn, answer === opt && styles.choiceSelected]} onPress={() => updateAnswer(q.id, opt)}><Text style={styles.choiceText}>{answer === opt ? '● ' : '○ '}{opt}</Text></TouchableOpacity>
             ))}
           </View>
         );
@@ -591,15 +649,19 @@ export default function App() {
     const tc = light ? '#000' : '#fff';
     const location = alert.incidentLocation || alert.codeLocation || alert.locationName || '';
     const codeName = alert.codeName || alert.code || '';
+    const icon = codeIcon(alert.code);
     return (
-      <View style={[styles.container, { backgroundColor: bg, paddingTop: 50 }]}>
+      <View style={[styles.container, { backgroundColor: bg, paddingTop: 50, padding: 0 }]}>
         <StatusBar hidden />
-        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24 }}>
+        <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24, paddingBottom: 16 }}>
           {codeName ? (
-            <View style={{ alignSelf: 'center', paddingHorizontal: 20, paddingVertical: 7, borderRadius: 999, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 8 }}>
+            <View style={{ alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingVertical: 7, borderRadius: 999, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 10 }}>
+              <Text style={{ fontSize: 15 }}>{icon}</Text>
               <Text style={{ color: tc, fontSize: 13, fontWeight: '700', letterSpacing: 2, textTransform: 'uppercase' }}>{codeName}</Text>
             </View>
-          ) : null}
+          ) : (
+            <Text style={{ fontSize: 40, textAlign: 'center', marginBottom: 2 }}>{icon}</Text>
+          )}
 
           <Text style={[styles.alertLabel, { color: tc, marginBottom: 6 }]}>{displayLabel(alert)}</Text>
 
@@ -644,18 +706,23 @@ export default function App() {
               ))}
             </View>
           ) : null}
-
-          <View style={[styles.alertBtnRow, { marginTop: 24 }]}>
-            {!alert.isClear ? (
-              <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000020' : '#ffffff20' }]} onPress={handleAcknowledge}>
-                <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Acknowledge</Text>
-              </TouchableOpacity>
-            ) : null}
-            <TouchableOpacity style={[styles.alertBtn, { backgroundColor: light ? '#00000015' : '#ffffff15' }]} onPress={() => { setAlert(null); setScreen('dashboard'); }}>
-              <Text style={{ color: tc, fontSize: 16, fontWeight: '600' }}>Dismiss</Text>
-            </TouchableOpacity>
-          </View>
         </ScrollView>
+
+        {/* Fixed action bar: always visible, never scrolls out of reach.
+            Acknowledge is the unmistakable primary action; Dismiss is a
+            de-emphasized secondary action so it can't be tapped by mistake. */}
+        <View style={[styles.alertBtnBar, { backgroundColor: bg, borderTopColor: light ? '#00000020' : '#ffffff25' }]}>
+          {!alert.isClear ? (
+            <TouchableOpacity style={[styles.alertBtnPrimary, { backgroundColor: tc }]} onPress={handleAcknowledge} activeOpacity={0.85}>
+              <Text style={{ color: bg, fontSize: 17, fontWeight: '800' }}>✓  Acknowledge</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity style={styles.alertBtnSecondary} onPress={() => { setAlert(null); setScreen('dashboard'); }} activeOpacity={0.6}>
+            <Text style={{ color: tc + '99', fontSize: 13.5, fontWeight: '600' }}>
+              {alert.isClear ? 'Dismiss' : 'Dismiss without acknowledging'}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -685,14 +752,25 @@ export default function App() {
     const bg = newsData.backgroundColor || '#1a1a2e';
     const light = luminance(bg) > 0.6;
     const tc = newsData.textColor || (light ? '#000' : '#fff');
+    const total = newsData.durationSec || 10;
+    const remaining = newsRemaining ?? total;
+    const pct = Math.max(0, Math.min(100, (remaining / total) * 100));
     return (
       <View style={{ flex: 1, backgroundColor: bg, paddingTop: 50, paddingHorizontal: 24, paddingBottom: 20 }}>
         <StatusBar hidden />
         <View style={{ flex: 1 }}>
-          <View style={{ alignSelf: 'flex-start', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 6, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 14 }}>
-            <Text style={{ color: light ? '#000000aa' : '#ffffffaa', fontSize: 12, fontWeight: '600' }}>
-              {newsData.type === 'card' ? 'AWARENESS' : 'UPDATE'}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <View style={{ paddingHorizontal: 12, paddingVertical: 4, borderRadius: 6, backgroundColor: light ? '#00000020' : '#ffffff20' }}>
+              <Text style={{ color: light ? '#000000aa' : '#ffffffaa', fontSize: 12, fontWeight: '600' }}>
+                {newsData.type === 'card' ? 'AWARENESS' : 'UPDATE'}
+              </Text>
+            </View>
+            <Text style={{ color: light ? '#00000080' : '#ffffff80', fontSize: 12, fontWeight: '600' }}>
+              Closing in {remaining}s
             </Text>
+          </View>
+          <View style={{ height: 3, borderRadius: 2, backgroundColor: light ? '#00000015' : '#ffffff15', overflow: 'hidden', marginBottom: 18 }}>
+            <View style={{ height: '100%', width: `${pct}%`, backgroundColor: light ? '#00000055' : '#ffffff55' }} />
           </View>
           <Text style={{ color: tc, fontSize: 28, fontWeight: '800', marginBottom: 16, lineHeight: 34 }}>{newsData.title}</Text>
           {newsData.body ? (
@@ -701,7 +779,7 @@ export default function App() {
             </ScrollView>
           ) : null}
         </View>
-        <TouchableOpacity onPress={() => { setNewsData(null); setScreen('dashboard'); }} style={{ alignSelf: 'center', paddingVertical: 14, paddingHorizontal: 48, borderRadius: 10, borderWidth: 1, borderColor: light ? '#00000030' : '#ffffff30', marginBottom: 10 }}>
+        <TouchableOpacity onPress={() => { cancelNewsTimer(); setNewsData(null); setScreen('dashboard'); }} style={{ alignSelf: 'center', paddingVertical: 14, paddingHorizontal: 48, borderRadius: 10, borderWidth: 1, borderColor: light ? '#00000030' : '#ffffff30', marginBottom: 10 }}>
           <Text style={{ color: light ? '#000000aa' : '#ffffffaa', fontSize: 16, fontWeight: '600' }}>Dismiss</Text>
         </TouchableOpacity>
       </View>
@@ -723,17 +801,65 @@ export default function App() {
             </View>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>Live</Text></View>
+            <View style={[
+              styles.livePill,
+              connState === 'reconnecting' && styles.reconnectingPill,
+              connState === 'offline' && styles.offlinePill,
+            ]}>
+              <View style={[
+                styles.liveDot,
+                connState === 'reconnecting' && styles.reconnectingDot,
+                connState === 'offline' && styles.offlineDot,
+              ]} />
+              <Text style={[
+                styles.liveText,
+                connState === 'reconnecting' && styles.reconnectingText,
+                connState === 'offline' && styles.offlineText,
+              ]}>
+                {connState === 'live' ? 'Live' : connState === 'reconnecting' ? 'Reconnecting' : 'Offline'}
+              </Text>
+            </View>
             <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>{getInitials(username)}</Text></TouchableOpacity>
           </View>
         </View>
 
+        {connState !== 'live' && (
+          <View style={styles.statusRow}>
+            <Text style={{ color: connState === 'offline' ? '#f87171' : '#fbbf24', fontSize: 12, fontWeight: '600' }}>
+              {connState === 'offline' ? '⚠ Not receiving live updates' : '⏳ Reconnecting…'}
+              {lastHeartbeatAt ? `  ·  last seen ${formatTime(new Date(lastHeartbeatAt))}` : ''}
+            </Text>
+          </View>
+        )}
+
+        {pendingNotifs.length > 0 && (
+          <View style={styles.pendingBanner}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text style={styles.pendingBannerTitle}>📥 While you were away</Text>
+              <TouchableOpacity onPress={dismissPendingNotifs}><Text style={styles.pendingBannerClear}>Clear</Text></TouchableOpacity>
+            </View>
+            {pendingNotifs.slice(0, 5).map((n, i) => (
+              <Text key={i} style={styles.pendingBannerItem} numberOfLines={1}>
+                {n.type === 'alert' ? '🚨' : n.type === 'survey' ? '📋' : '📰'} {n.title}
+              </Text>
+            ))}
+            {pendingNotifs.length > 5 ? (
+              <Text style={styles.pendingBannerMore}>+{pendingNotifs.length - 5} more</Text>
+            ) : null}
+          </View>
+        )}
+
         <View style={styles.tabBar}>
-          {(['alerts', 'news', 'surveys'] as const).map((t) => (
-            <TouchableOpacity key={t} style={[styles.tab, activeTab === t && styles.tabActive]} onPress={() => setActiveTab(t)}>
-              <Text style={[styles.tabText, activeTab === t && styles.tabTextActive]}>{t === 'alerts' ? `Alerts (${alertHistory.length})` : t === 'news' ? `News (${newsList.length})` : `Surveys (${surveyList.length})`}</Text>
-            </TouchableOpacity>
-          ))}
+          {(['alerts', 'news', 'surveys'] as const).map((t) => {
+            const tabIcon = t === 'alerts' ? '⚠️' : t === 'news' ? '📰' : '📋';
+            const label = t === 'alerts' ? `Alerts (${alertHistory.length})` : t === 'news' ? `News (${newsList.length})` : `Surveys (${surveyList.length})`;
+            return (
+              <TouchableOpacity key={t} style={[styles.tab, activeTab === t && styles.tabActive]} onPress={() => setActiveTab(t)}>
+                <Text style={{ fontSize: 12 }}>{tabIcon}</Text>
+                <Text style={[styles.tabText, activeTab === t && styles.tabTextActive]}>{label}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 16 }}>
@@ -749,7 +875,10 @@ export default function App() {
                   const bg = item.color || codeColor(item.code);
                   return (
                     <View key={idx} style={styles.alertItem}>
-                      <View style={[styles.alertDot, { backgroundColor: bg }]} />
+                      <View style={[styles.cardBar, { backgroundColor: bg }]} />
+                      <View style={[styles.alertIconBadge, { backgroundColor: bg + '30', borderColor: bg }]}>
+                        <Text style={{ fontSize: 14 }}>{codeIcon(item.code)}</Text>
+                      </View>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.alertItemTitle}>{title}</Text>
                         {item.message ? <Text style={styles.alertItemMeta}>{item.message}</Text> : null}
@@ -770,6 +899,7 @@ export default function App() {
               ) : (
                 newsList.map((item) => (
                   <View key={item.id} style={styles.newsCard}>
+                    <View style={[styles.cardBar, { backgroundColor: item.type === 'card' ? '#9c27b0' : '#3a7bd5' }]} />
                     <View style={[styles.newsTag, { backgroundColor: item.type === 'card' ? '#7b1fa240' : '#3a7bd540' }]}>
                       <Text style={{ fontSize: 11, fontWeight: '600', color: item.type === 'card' ? '#ce93d8' : '#7bb3ff' }}>{item.type === 'card' ? 'Awareness' : 'Update'}</Text>
                     </View>
@@ -791,6 +921,7 @@ export default function App() {
                   const submitted = submittedCampaigns.has(item.campaignId);
                   return (
                     <View key={item.campaignId} style={styles.surveyCard}>
+                      <View style={[styles.cardBar, { backgroundColor: submitted ? '#4caf50' : '#3a7bd5' }]} />
                       <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.survey.title}</Text>
                       {item.survey.description ? <Text style={{ color: '#ffffff80', fontSize: 13, marginBottom: 6 }}>{item.survey.description}</Text> : null}
                       <Text style={{ color: '#ffffff50', fontSize: 11, marginBottom: 10 }}>{item.survey.questions.length} questions</Text>
@@ -833,16 +964,29 @@ const styles = StyleSheet.create({
   livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
   liveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22c55e' },
   liveText: { color: '#86efac', fontSize: 11, fontWeight: '600' },
+  reconnectingPill: { backgroundColor: '#f59e0b1f', borderColor: '#f59e0b40' },
+  reconnectingDot: { backgroundColor: '#f59e0b' },
+  reconnectingText: { color: '#fcd34d' },
+  offlinePill: { backgroundColor: '#ef44441f', borderColor: '#ef444440' },
+  offlineDot: { backgroundColor: '#ef4444' },
+  offlineText: { color: '#fca5a5' },
+  pendingBanner: { marginHorizontal: 16, marginBottom: 12, padding: 14, borderRadius: 14, backgroundColor: '#3a7bd51a', borderWidth: 1, borderColor: '#3a7bd540' },
+  pendingBannerTitle: { color: '#bfdbfe', fontSize: 13, fontWeight: '700' },
+  pendingBannerClear: { color: '#7bb3ff', fontSize: 12.5, fontWeight: '700' },
+  pendingBannerItem: { color: '#ffffffcc', fontSize: 13, marginTop: 3 },
+  pendingBannerMore: { color: '#ffffff70', fontSize: 12, marginTop: 4, fontStyle: 'italic' },
+  alertIconBadge: { width: 32, height: 32, borderRadius: 16, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
   avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center' },
   avatarText: { color: '#cbd5e1', fontSize: 13, fontWeight: '700' },
   statusRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 16, flexShrink: 0 },
   tabBar: { width: '100%', flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingBottom: 12, flexShrink: 0 },
-  tab: { flex: 1, paddingVertical: 11, alignItems: 'center', borderRadius: 13, borderWidth: 1, borderColor: '#ffffff12', backgroundColor: '#101728' },
-  tabActive: { backgroundColor: '#3a7bd5', borderColor: 'transparent' },
+  tab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 11, borderRadius: 13, borderWidth: 1, borderColor: '#ffffff12', backgroundColor: '#101728' },
+  tabActive: { backgroundColor: '#3a7bd5', borderColor: 'transparent', shadowColor: '#3a7bd5', shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 5 }, elevation: 5 },
+  cardBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
   tabText: { color: '#8a97b0', fontSize: 13.5, fontWeight: '600' },
   tabTextActive: { color: '#ffffff' },
   sectionTitle: { color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
-  alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 12, marginBottom: 8 },
+  alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 8, position: 'relative', overflow: 'hidden' },
   alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
   alertItemTitle: { color: '#ffffffcc', fontSize: 15, fontWeight: '600' },
   alertItemMeta: { color: '#ffffff60', fontSize: 12, marginTop: 2 },
@@ -853,11 +997,12 @@ const styles = StyleSheet.create({
   teamAction: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1 },
   tnum: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   tnumText: { fontSize: 13, fontWeight: '700' },
-  alertBtnRow: { flexDirection: 'row', gap: 12 },
-  alertBtn: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
-  newsCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
+  alertBtnBar: { width: '100%', paddingHorizontal: 24, paddingTop: 12, paddingBottom: 28, borderTopWidth: 1, gap: 8, flexShrink: 0 },
+  alertBtnPrimary: { width: '100%', paddingVertical: 16, borderRadius: 14, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 3 },
+  alertBtnSecondary: { width: '100%', paddingVertical: 10, alignItems: 'center' },
+  newsCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden' },
   newsTag: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 2, borderRadius: 4, marginBottom: 8 },
-  surveyCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12 },
+  surveyCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden' },
   fillBtn: { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 8, backgroundColor: '#3a7bd5', borderRadius: 6 },
   questionBlock: { marginBottom: 20 },
   questionText: { color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 8 },
