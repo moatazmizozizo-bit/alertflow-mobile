@@ -236,6 +236,7 @@ function AppContent() {
   const [pendingNotifs, setPendingNotifs] = useState<{ type: string; title: string; body: string; ts: number }[]>([]);
   const [newsRemaining, setNewsRemaining] = useState<number | null>(null);
   const [connToast, setConnToast] = useState<string | null>(null);
+  const [showSaved, setShowSaved] = useState(false);
   const connToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -748,6 +749,8 @@ function AppContent() {
     setServerInput(s);
     apiBaseRef.current = s;
     await saveApiBase(s);
+    setShowSaved(true);
+    setTimeout(() => setShowSaved(false), 2000);
   }, []);
 
   const handleSaveVoice = useCallback(async (v: boolean) => {
@@ -1070,6 +1073,29 @@ function AppContent() {
   // === DASHBOARD (3 tabs) ===
   if (screen === 'dashboard') {
     const recentAlerts = alertHistory.slice(0, 10);
+    const syncText = connState === 'live' && lastHeartbeatAt
+      ? `Synced ${Math.floor((clock.getTime() - lastHeartbeatAt) / 1000)}s ago`
+      : null;
+    const renderEmptyState = (tab: 'alerts' | 'news' | 'surveys') => {
+      const config: Record<string, { icon: string; primary: string }> = {
+        alerts: { icon: '⚠️', primary: 'No alerts yet' },
+        news: { icon: '📰', primary: 'No news yet' },
+        surveys: { icon: '📋', primary: 'No surveys yet' },
+      };
+      const c = config[tab];
+      const secondary = connState === 'live'
+        ? "You're connected — new items will appear here automatically."
+        : connState === 'reconnecting'
+        ? 'Reconnecting — items may be delayed.'
+        : 'Offline — check your connection.';
+      return (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 40 }}>
+          <Text style={{ fontSize: 44, opacity: 0.25, marginBottom: 16 }}>{c.icon}</Text>
+          <Text style={{ color: '#ffffff99', fontSize: 16, fontWeight: '600', marginBottom: 8 }}>{c.primary}</Text>
+          <Text style={{ color: '#ffffff50', fontSize: 13, textAlign: 'center', paddingHorizontal: 32 }}>{secondary}</Text>
+        </View>
+      );
+    };
     return (
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
@@ -1169,15 +1195,16 @@ function AppContent() {
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <Text style={styles.sectionTitle}>Alert History</Text>
-                {alertHistory.length > 0 && (
-                  <TouchableOpacity onPress={() => setAlertHistory([])}>
-                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
-                  </TouchableOpacity>
-                )}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  {syncText ? <Text style={{ color: '#ffffff40', fontSize: 10, fontWeight: '500' }}>{syncText}</Text> : null}
+                  {alertHistory.length > 0 && (
+                    <TouchableOpacity onPress={() => setAlertHistory([])}>
+                      <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
-              {alertHistory.length === 0 ? (
-                <View style={styles.emptyState}><Text style={styles.emptyText}>No alerts received yet</Text></View>
-              ) : (
+              {alertHistory.length === 0 ? renderEmptyState('alerts') : (
                 (alertHistFull ? alertHistory : alertHistory.slice(0, 10)).map((item, idx) => {
                   const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
                   const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
@@ -1211,15 +1238,16 @@ function AppContent() {
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <Text style={styles.sectionTitle}>News & Awareness</Text>
-                {newsList.length > 0 && (
-                  <TouchableOpacity onPress={() => setNewsList([])}>
-                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
-                  </TouchableOpacity>
-                )}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  {syncText ? <Text style={{ color: '#ffffff40', fontSize: 10, fontWeight: '500' }}>{syncText}</Text> : null}
+                  {newsList.length > 0 && (
+                    <TouchableOpacity onPress={() => setNewsList([])}>
+                      <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
-              {newsList.length === 0 ? (
-                <View style={styles.emptyState}><Text style={styles.emptyText}>No news received yet</Text></View>
-              ) : (
+              {newsList.length === 0 ? renderEmptyState('news') : (
                 newsList.map((item) => {
                   const viewed = viewedNewsIds.has(item.id);
                   return (
@@ -1245,15 +1273,16 @@ function AppContent() {
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <Text style={styles.sectionTitle}>Surveys</Text>
-                {surveyList.length > 0 && (
-                  <TouchableOpacity onPress={() => setSurveyList([])}>
-                    <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
-                  </TouchableOpacity>
-                )}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  {syncText ? <Text style={{ color: '#ffffff40', fontSize: 10, fontWeight: '500' }}>{syncText}</Text> : null}
+                  {surveyList.length > 0 && (
+                    <TouchableOpacity onPress={() => setSurveyList([])}>
+                      <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
               </View>
-              {surveyList.length === 0 ? (
-                <View style={styles.emptyState}><Text style={styles.emptyText}>No surveys received yet</Text></View>
-              ) : (
+              {surveyList.length === 0 ? renderEmptyState('surveys') : (
                 surveyList.map((item) => {
                   const submitted = submittedCampaigns.has(item.campaignId);
                   const expDate = item.survey.expiresAt ? new Date(item.survey.expiresAt) : null;
@@ -1296,7 +1325,10 @@ function AppContent() {
                   <TouchableOpacity onPress={() => setShowSettings(false)}><Text style={{ color: '#7bb3ff', fontSize: 15, fontWeight: '600' }}>Done</Text></TouchableOpacity>
                 </View>
 
-                <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Server</Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>Server</Text>
+                  {showSaved ? <Text style={{ color: '#4caf50', fontSize: 12, fontWeight: '600' }}>✓ Saved</Text> : null}
+                </View>
                 <TextInput style={[styles.input, { marginBottom: 16 }]} value={serverInput} onChangeText={(v) => handleSaveSettings(v)} autoCapitalize="none" keyboardType="url" placeholder="Server address" placeholderTextColor="#ffffff60" />
 
                 <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Voice & Sound</Text>
@@ -1310,11 +1342,11 @@ function AppContent() {
                     <Text style={{ color: '#ffffff80', fontSize: 13 }}>{volumeLevel}%</Text>
                   </View>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <Text style={{ color: '#ffffff40', fontSize: 11 }}>🔈</Text>
+                    <Text style={{ color: '#ffffff80', fontSize: 16 }}>🔈</Text>
                     <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: '#ffffff20', overflow: 'hidden' }}>
                       <View style={{ width: `${volumeLevel}%`, height: '100%', backgroundColor: '#3a7bd5', borderRadius: 3 }} />
                     </View>
-                    <Text style={{ color: '#ffffff40', fontSize: 11 }}>🔊</Text>
+                    <Text style={{ color: '#ffffff80', fontSize: 16 }}>🔊</Text>
                   </View>
                 </View>
 
