@@ -28,6 +28,8 @@ const HISTORY_SUBMITTED_KEY = 'history_submitted_campaigns';
 const SETTINGS_KEY = 'user_settings';
 const ACKED_KEY = 'acknowledged_alerts';
 const PENDING_ACKS_KEY = 'pending_ack_retries';
+const FILTER_DURATION_KEY = 'filter_duration';
+const FILTER_SEVERITY_KEY = 'filter_severity';
 
 type AlertData = {
   id?: string;
@@ -237,6 +239,9 @@ function AppContent() {
   const [newsRemaining, setNewsRemaining] = useState<number | null>(null);
   const [connToast, setConnToast] = useState<string | null>(null);
   const [showSaved, setShowSaved] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const [durationFilter, setDurationFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
+  const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set());
   const connToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -326,10 +331,18 @@ function AppContent() {
       await loadPendingNotifs();
 
       try {
+        const dur = await AsyncStorage.getItem(FILTER_DURATION_KEY);
+        if (dur === 'today' || dur === 'week' || dur === 'month' || dur === 'all') setDurationFilter(dur);
+        const sev = await AsyncStorage.getItem(FILTER_SEVERITY_KEY);
+        if (sev) setSeverityFilter(new Set(JSON.parse(sev)));
+      } catch { log.warn('Failed to load filter preferences'); }
+
+      try {
         const player = createAudioPlayer(require('./assets/beep.wav'));
         soundPlayerRef.current = player;
       } catch { log.warn('Failed to create audio player'); }
 
+      setHasHydrated(true);
       setScreen('login');
     })();
     return () => { mounted = false; };
@@ -353,32 +366,49 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(HISTORY_ALERTS_KEY, JSON.stringify(alertHistory)); } catch { log.warn('Failed to persist alert history'); }
-  }, [alertHistory]);
+  }, [alertHistory, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(HISTORY_NEWS_KEY, JSON.stringify(newsList)); } catch { log.warn('Failed to persist news list'); }
-  }, [newsList]);
+  }, [newsList, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(HISTORY_SURVEYS_KEY, JSON.stringify(surveyList)); } catch { log.warn('Failed to persist survey list'); }
-  }, [surveyList]);
+  }, [surveyList, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(HISTORY_SUBMITTED_KEY, JSON.stringify([...submittedCampaigns])); } catch { log.warn('Failed to persist submitted campaigns'); }
-  }, [submittedCampaigns]);
+  }, [submittedCampaigns, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(ACKED_KEY, JSON.stringify([...acknowledgedAlertIds])); } catch { log.warn('Failed to persist acknowledged alerts'); }
-  }, [acknowledgedAlertIds]);
+  }, [acknowledgedAlertIds, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ voiceToggle, volumeLevel })); } catch { log.warn('Failed to persist settings'); }
-  }, [voiceToggle, volumeLevel]);
+  }, [voiceToggle, volumeLevel, hasHydrated]);
 
   useEffect(() => {
+    if (!hasHydrated) return;
     try { AsyncStorage.setItem(PENDING_ACKS_KEY, JSON.stringify(pendingAcks)); } catch { log.warn('Failed to persist pending acks'); }
-  }, [pendingAcks]);
+  }, [pendingAcks, hasHydrated]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    try { AsyncStorage.setItem(FILTER_DURATION_KEY, JSON.stringify(durationFilter)); } catch { log.warn('Failed to persist duration filter'); }
+  }, [durationFilter, hasHydrated]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    try { AsyncStorage.setItem(FILTER_SEVERITY_KEY, JSON.stringify([...severityFilter])); } catch { log.warn('Failed to persist severity filter'); }
+  }, [severityFilter, hasHydrated]);
 
   const playAlertSound = useCallback(async () => {
     try {
@@ -441,7 +471,7 @@ function AppContent() {
     setAnswers({});
     setSurveySubmitted(false);
     setScreen('alert');
-    setAlertHistory((prev) => [{ ...data, ts: new Date() }, ...prev].slice(0, 20));
+    setAlertHistory((prev) => [{ ...data, ts: new Date() }, ...prev].slice(0, 200));
 
     const bg = data.color || codeColor(data.code);
     const light = luminance(bg) > 0.6;
@@ -471,7 +501,7 @@ function AppContent() {
     setScreen('survey');
     setSurveyList((prev) => {
       if (prev.find((s) => s.campaignId === data.campaignId)) return prev;
-      return [...prev, data];
+      return [...prev, data].slice(-50);
     });
   }, []);
 
@@ -486,7 +516,7 @@ function AppContent() {
     setViewedNewsIds((prev) => new Set(prev).add(data.id));
     setNewsList((prev) => {
       if (prev.find((n) => n.id === data.id)) return prev;
-      return [...prev, data];
+      return [...prev, data].slice(-50);
     });
     const total = data.durationSec || 10;
     setNewsRemaining(total);
@@ -1073,6 +1103,23 @@ function AppContent() {
   // === DASHBOARD (3 tabs) ===
   if (screen === 'dashboard') {
     const recentAlerts = alertHistory.slice(0, 10);
+    const filterByDuration = (ts: Date | string | null | undefined): boolean => {
+      if (durationFilter === 'all' || !ts) return true;
+      const d = typeof ts === 'string' ? new Date(ts) : ts;
+      const now = clock;
+      const ms = durationFilter === 'today' ? 86400000 : durationFilter === 'week' ? 604800000 : 2592000000;
+      return now.getTime() - d.getTime() < ms;
+    };
+    const severityFilterActive = severityFilter.size > 0;
+    const filteredAlerts = alertHistory.filter((item) => {
+      if (!filterByDuration(item.ts)) return false;
+      if (severityFilterActive && item.code && !severityFilter.has(item.code)) return false;
+      return true;
+    });
+    const filteredNews = newsList.filter((item) => {
+      return filterByDuration(item.updatedAt || item.startAt);
+    });
+    const filteredSurveys = surveyList; // no timestamp for survey items
     const syncText = connState === 'live' && lastHeartbeatAt
       ? `Synced ${Math.floor((clock.getTime() - lastHeartbeatAt) / 1000)}s ago`
       : null;
@@ -1204,8 +1251,45 @@ function AppContent() {
                   )}
                 </View>
               </View>
-              {alertHistory.length === 0 ? renderEmptyState('alerts') : (
-                (alertHistFull ? alertHistory : alertHistory.slice(0, 10)).map((item, idx) => {
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {(['today', 'week', 'month', 'all'] as const).map((d) => (
+                  <TouchableOpacity key={d} onPress={() => setDurationFilter(d)}
+                    style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: durationFilter === d ? '#3a7bd560' : '#ffffff10', borderWidth: 1, borderColor: durationFilter === d ? '#3a7bd5' : '#ffffff20' }}>
+                    <Text style={{ color: durationFilter === d ? '#fff' : '#ffffff99', fontSize: 11, fontWeight: '600' }}>{d === 'today' ? 'Today' : d === 'week' ? 'This week' : d === 'month' ? 'This month' : 'All time'}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginBottom: 10 }}>
+                <TouchableOpacity onPress={() => setSeverityFilter(new Set())}
+                  style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: !severityFilterActive ? '#3a7bd530' : '#ffffff15', borderWidth: 1, borderColor: !severityFilterActive ? '#3a7bd540' : '#ffffff30' }}>
+                  <Text style={{ color: !severityFilterActive ? '#7bb3ff' : '#ffffff99', fontSize: 10, fontWeight: '600' }}>All codes</Text>
+                </TouchableOpacity>
+                {Object.keys(CODE_COLORS).map((code) => {
+                  const selected = severityFilter.has(code);
+                  return (
+                    <TouchableOpacity key={code} onPress={() => {
+                      const next = new Set(severityFilter);
+                      if (selected) next.delete(code); else next.add(code);
+                      setSeverityFilter(next.size ? next : new Set());
+                    }}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: selected ? CODE_COLORS[code] + '40' : '#ffffff10', borderWidth: 1, borderColor: selected ? CODE_COLORS[code] : '#ffffff20' }}>
+                      <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: CODE_COLORS[code] }} />
+                      <Text style={{ fontSize: 11 }}>{CODE_ICONS[code] || '🚨'}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {filteredAlerts.length === 0 ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 40 }}>
+                  <Text style={{ color: '#ffffff99', fontSize: 16, fontWeight: '600' }}>{alertHistory.length === 0 ? 'No alerts yet' : 'No alerts match this filter'}</Text>
+                  <Text style={{ color: '#ffffff50', fontSize: 13, textAlign: 'center', paddingHorizontal: 32, marginTop: 8 }}>
+                    {alertHistory.length === 0
+                      ? (connState === 'live' ? "You're connected — new alerts will appear here automatically." : connState === 'reconnecting' ? 'Reconnecting — alerts may be delayed.' : 'Offline — check your connection.')
+                      : 'Try adjusting the filters above.'}
+                  </Text>
+                </View>
+              ) : (
+                (alertHistFull ? filteredAlerts : filteredAlerts.slice(0, 50)).map((item, idx) => {
                   const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
                   const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
                   const bg = item.color || codeColor(item.code);
@@ -1226,9 +1310,9 @@ function AppContent() {
                   );
                 })
               )}
-              {!alertHistFull && alertHistory.length > 10 && (
+              {!alertHistFull && filteredAlerts.length > 50 && (
                 <TouchableOpacity onPress={() => setAlertHistFull(true)} style={{ paddingVertical: 12, alignItems: 'center' }}>
-                  <Text style={{ color: '#3a7bd5', fontSize: 13, fontWeight: '600' }}>Show all ({alertHistory.length})</Text>
+                  <Text style={{ color: '#3a7bd5', fontSize: 13, fontWeight: '600' }}>Show all ({filteredAlerts.length})</Text>
                 </TouchableOpacity>
               )}
             </>
@@ -1247,8 +1331,25 @@ function AppContent() {
                   )}
                 </View>
               </View>
-              {newsList.length === 0 ? renderEmptyState('news') : (
-                newsList.map((item) => {
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {(['today', 'week', 'month', 'all'] as const).map((d) => (
+                  <TouchableOpacity key={d} onPress={() => setDurationFilter(d)}
+                    style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: durationFilter === d ? '#3a7bd560' : '#ffffff10', borderWidth: 1, borderColor: durationFilter === d ? '#3a7bd5' : '#ffffff20' }}>
+                    <Text style={{ color: durationFilter === d ? '#fff' : '#ffffff99', fontSize: 11, fontWeight: '600' }}>{d === 'today' ? 'Today' : d === 'week' ? 'This week' : d === 'month' ? 'This month' : 'All time'}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {filteredNews.length === 0 ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 40 }}>
+                  <Text style={{ color: '#ffffff99', fontSize: 16, fontWeight: '600' }}>{newsList.length === 0 ? 'No news yet' : 'No news match this filter'}</Text>
+                  <Text style={{ color: '#ffffff50', fontSize: 13, textAlign: 'center', paddingHorizontal: 32, marginTop: 8 }}>
+                    {newsList.length === 0
+                      ? (connState === 'live' ? "You're connected — new news will appear here automatically." : connState === 'reconnecting' ? 'Reconnecting — news may be delayed.' : 'Offline — check your connection.')
+                      : 'Try adjusting the filter above.'}
+                  </Text>
+                </View>
+              ) : (
+                filteredNews.map((item) => {
                   const viewed = viewedNewsIds.has(item.id);
                   return (
                     <TouchableOpacity key={item.id} style={[styles.newsCard, { opacity: viewed ? 0.65 : 1 }]} onPress={() => showNewsScreen(item)} activeOpacity={0.8}>
@@ -1282,8 +1383,25 @@ function AppContent() {
                   )}
                 </View>
               </View>
-              {surveyList.length === 0 ? renderEmptyState('surveys') : (
-                surveyList.map((item) => {
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {(['today', 'week', 'month', 'all'] as const).map((d) => (
+                  <TouchableOpacity key={d} onPress={() => setDurationFilter(d)}
+                    style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: durationFilter === d ? '#3a7bd560' : '#ffffff10', borderWidth: 1, borderColor: durationFilter === d ? '#3a7bd5' : '#ffffff20' }}>
+                    <Text style={{ color: durationFilter === d ? '#fff' : '#ffffff99', fontSize: 11, fontWeight: '600' }}>{d === 'today' ? 'Today' : d === 'week' ? 'This week' : d === 'month' ? 'This month' : 'All time'}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {filteredSurveys.length === 0 ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 40 }}>
+                  <Text style={{ color: '#ffffff99', fontSize: 16, fontWeight: '600' }}>{surveyList.length === 0 ? 'No surveys yet' : 'No surveys match this filter'}</Text>
+                  <Text style={{ color: '#ffffff50', fontSize: 13, textAlign: 'center', paddingHorizontal: 32, marginTop: 8 }}>
+                    {surveyList.length === 0
+                      ? (connState === 'live' ? "You're connected — new surveys will appear here automatically." : connState === 'reconnecting' ? 'Reconnecting — surveys may be delayed.' : 'Offline — check your connection.')
+                      : 'Try adjusting the filter above.'}
+                  </Text>
+                </View>
+              ) : (
+                filteredSurveys.map((item) => {
                   const submitted = submittedCampaigns.has(item.campaignId);
                   const expDate = item.survey.expiresAt ? new Date(item.survey.expiresAt) : null;
                   const expired = expDate && expDate < new Date();
