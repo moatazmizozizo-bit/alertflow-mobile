@@ -5,6 +5,7 @@ import {
   RefreshControl, KeyboardAvoidingView, Switch,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Speech from 'expo-speech';
 import { createAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
@@ -198,7 +199,8 @@ async function removeSecureToken(): Promise<void> {
   try { await SecureStore.deleteItemAsync(SECURE_AUTH_TOKEN_KEY); } catch { log.warn('Failed to remove token from SecureStore'); }
 }
 
-export default function App() {
+function AppContent() {
+  const insets = useSafeAreaInsets();
   const [screen, setScreen] = useState<'loading' | 'login' | 'alert' | 'survey' | 'news' | 'dashboard'>('loading');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -233,6 +235,8 @@ export default function App() {
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
   const [pendingNotifs, setPendingNotifs] = useState<{ type: string; title: string; body: string; ts: number }[]>([]);
   const [newsRemaining, setNewsRemaining] = useState<number | null>(null);
+  const [connToast, setConnToast] = useState<string | null>(null);
+  const connToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -918,7 +922,7 @@ export default function App() {
     const codeName = alert.codeName || alert.code || '';
     const icon = codeIcon(alert.code);
     return (
-      <View style={[styles.container, { backgroundColor: bg, paddingTop: 50, padding: 0 }]}>
+      <View style={[styles.container, { backgroundColor: bg, paddingTop: insets.top + 20, padding: 0 }]}>
         <StatusBar hidden />
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24, paddingBottom: 16 }}>
           {codeName ? (
@@ -1007,7 +1011,7 @@ export default function App() {
     const survey = surveyData.survey;
     return (
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 40 }]}>
+      <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: insets.top + 10 }]}>
         <StatusBar hidden />
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 20 }}>
           <Text style={[styles.brandTitle, { fontSize: 28, marginBottom: 8 }]}>{survey.title}</Text>
@@ -1033,7 +1037,7 @@ export default function App() {
     const remaining = newsRemaining ?? total;
     const pct = Math.max(0, Math.min(100, (remaining / total) * 100));
     return (
-      <View style={{ flex: 1, backgroundColor: bg, paddingTop: 50, paddingHorizontal: 24, paddingBottom: 20 }}>
+      <View style={{ flex: 1, backgroundColor: bg, paddingTop: insets.top + 20, paddingHorizontal: 24, paddingBottom: 20 }}>
         <StatusBar hidden />
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -1069,53 +1073,51 @@ export default function App() {
     return (
       <View style={[styles.container, { backgroundColor: '#1a1a2e', paddingTop: 0, paddingHorizontal: 0 }]}>
         <StatusBar hidden />
-        <View style={styles.topBar}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <View style={[styles.topBar, { paddingTop: insets.top + 6 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexShrink: 1 }}>
             <Image source={iconPng} style={styles.topIcon} resizeMode="contain" />
-            <View>
-              <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }}>AlertFlow</Text>
-              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center · v1.0.0</Text>
+            <View style={{ flexShrink: 1 }}>
+              <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }} numberOfLines={1} ellipsizeMode="tail">AlertFlow</Text>
+              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }} numberOfLines={1} ellipsizeMode="tail">Command Center</Text>
             </View>
           </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <TouchableOpacity onPress={() => setShowCodeRef(true)} style={{ paddingHorizontal: 6, paddingVertical: 4 }} accessible={true} accessibilityLabel="Code reference" accessibilityRole="button">
-              <Text style={{ fontSize: 18 }}>📖</Text>
-            </TouchableOpacity>
-            <View style={[
-              styles.livePill,
-              connState === 'reconnecting' && styles.reconnectingPill,
-              connState === 'offline' && styles.offlinePill,
-            ]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <TouchableOpacity
+              onPress={() => {
+                if (connToastTimer.current) clearTimeout(connToastTimer.current);
+                const msg = connState === 'live' ? '✓ Connected' : connState === 'reconnecting' ? '⏳ Reconnecting…' : '⚠ Offline';
+                setConnToast(msg);
+                connToastTimer.current = setTimeout(() => setConnToast(null), 3000);
+              }}
+              style={[
+                styles.liveDotWrap,
+                connState === 'reconnecting' && styles.liveDotWrapReconnecting,
+                connState === 'offline' && styles.liveDotWrapOffline,
+              ]}
+              accessible={true}
+              accessibilityLabel={connState === 'live' ? 'Connected' : connState === 'reconnecting' ? 'Reconnecting' : 'Offline'}
+              accessibilityRole="button"
+            >
               <View style={[
                 styles.liveDot,
                 connState === 'reconnecting' && styles.reconnectingDot,
                 connState === 'offline' && styles.offlineDot,
               ]} />
-              <Text style={[
-                styles.liveText,
-                connState === 'reconnecting' && styles.reconnectingText,
-                connState === 'offline' && styles.offlineText,
-              ]}>
-                {connState === 'live' ? 'Live' : connState === 'reconnecting' ? 'Reconnecting' : 'Offline'}
-              </Text>
-            </View>
-            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.avatar} accessible={true} accessibilityLabel="Settings">
-              <Text style={styles.avatarText}>⚙</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={handleLogout} style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center' }} accessible={true} accessibilityLabel="Log out" accessibilityRole="button">
-              <Text style={styles.avatarText}>{getInitials(username)}</Text>
+            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.menuBtn} accessible={true} accessibilityLabel="Settings" accessibilityRole="button">
+              <Text style={styles.menuBtnText}>⋯</Text>
             </TouchableOpacity>
           </View>
         </View>
 
-        {connState !== 'live' && (
+        {(connState !== 'live' || connToast) ? (
           <View style={styles.statusRow}>
-            <Text style={{ color: connState === 'offline' ? '#f87171' : '#fbbf24', fontSize: 12, fontWeight: '600' }}>
-              {connState === 'offline' ? '⚠ Not receiving live updates' : '⏳ Reconnecting…'}
-              {lastHeartbeatAt ? `  ·  last seen ${formatTime(new Date(lastHeartbeatAt))}` : ''}
+            <Text style={{ color: connState === 'offline' ? '#f87171' : connState === 'reconnecting' ? '#fbbf24' : '#86efac', fontSize: 12, fontWeight: '600' }}>
+              {connToast || (connState === 'offline' ? '⚠ Not receiving live updates' : connState === 'reconnecting' ? '⏳ Reconnecting…' : '')}
+              {!connToast && lastHeartbeatAt ? `  ·  last seen ${formatTime(new Date(lastHeartbeatAt))}` : ''}
             </Text>
           </View>
-        )}
+        ) : null}
 
         {pendingNotifs.length > 0 && (
           <View style={styles.pendingBanner}>
@@ -1316,7 +1318,13 @@ export default function App() {
                   </View>
                 </View>
 
-                <TouchableOpacity onPress={() => { setShowSettings(false); handleLogout(); }} style={{ width: '100%', paddingVertical: 14, borderRadius: 12, backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440', alignItems: 'center' }}>
+                <TouchableOpacity onPress={() => { setShowSettings(false); setShowCodeRef(true); }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 4, borderTopWidth: 1, borderTopColor: '#ffffff10', marginTop: 8 }}>
+                  <Text style={{ fontSize: 18 }}>📖</Text>
+                  <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600' }}>Code Reference</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity onPress={() => { setShowSettings(false); handleLogout(); }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 4, borderTopWidth: 1, borderTopColor: '#ffffff10' }}>
+                  <Text style={{ fontSize: 18 }}>🚪</Text>
                   <Text style={{ color: '#ef4444', fontSize: 16, fontWeight: '700' }}>Log Out</Text>
                 </TouchableOpacity>
 
@@ -1357,6 +1365,14 @@ export default function App() {
   return null;
 }
 
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppContent />
+    </SafeAreaProvider>
+  );
+}
+
 const { width } = Dimensions.get('window');
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
@@ -1370,8 +1386,13 @@ const styles = StyleSheet.create({
   brandLetters: { fontSize: 22, fontWeight: '900', color: '#3B82F6', letterSpacing: -1 },
   brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
   brandSub: { fontSize: 12, color: '#ffffff99', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
-  topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
+  topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
   topIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#0c1428', borderWidth: 1, borderColor: '#ffffff10' },
+  liveDotWrap: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40', alignItems: 'center', justifyContent: 'center' },
+  liveDotWrapReconnecting: { backgroundColor: '#f59e0b1f', borderColor: '#f59e0b40' },
+  liveDotWrapOffline: { backgroundColor: '#ef44441f', borderColor: '#ef444440' },
+  menuBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center' },
+  menuBtnText: { color: '#cbd5e1', fontSize: 18, fontWeight: '700', lineHeight: 22 },
   livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
   liveDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: '#22c55e' },
   liveText: { color: '#86efac', fontSize: 11, fontWeight: '600' },
