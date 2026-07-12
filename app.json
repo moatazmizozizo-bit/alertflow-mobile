@@ -32,6 +32,9 @@
         "android": {
           "usesCleartextTraffic": true
         }
+      }],
+      ["expo-audio", {
+        "enableBackgroundPlayback": false
       }]
     ],
     "extra": {

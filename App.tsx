@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
-import { Audio } from 'expo-av';
+import { createAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import iconPng from './assets/alertflow-icon.png';
@@ -209,6 +209,7 @@ export default function App() {
   const appStateRef = useRef(AppState.currentState);
   const newsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const surveySubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const soundPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -273,6 +274,11 @@ export default function App() {
       } catch {}
       await loadPendingNotifs();
 
+      try {
+        const player = createAudioPlayer(require('./assets/beep.wav'));
+        soundPlayerRef.current = player;
+      } catch {}
+
       setScreen('login');
     })();
     return () => { mounted = false; };
@@ -287,6 +293,10 @@ export default function App() {
       if (newsIntervalRef.current) {
         clearInterval(newsIntervalRef.current);
         newsIntervalRef.current = null;
+      }
+      if (soundPlayerRef.current) {
+        try { soundPlayerRef.current.remove(); } catch {}
+        soundPlayerRef.current = null;
       }
     };
   }, []);
@@ -317,9 +327,11 @@ export default function App() {
 
   const playAlertSound = useCallback(async () => {
     try {
-      const { sound } = await Audio.Sound.createAsync(require('./assets/beep.wav'), { volume: volumeLevel / 100 });
-      await sound.playAsync();
-      sound.setOnPlaybackStatusUpdate((status) => { if (status.isLoaded && status.didJustFinish) sound.unloadAsync(); });
+      const player = soundPlayerRef.current;
+      if (player) {
+        player.volume = volumeLevel / 100;
+        player.play();
+      }
     } catch {}
     try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); } catch {}
   }, [volumeLevel]);
