@@ -13,6 +13,13 @@ import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
 const WS_PORT = 3004;
 const HBEAT_MS = 3000;
 const ALERT_DISPLAY_MS = 30000;
+const AUTH_TOKEN_KEY = 'authToken';
+const AUTH_USERNAME_KEY = 'authUsername';
+const AUTH_SAVED_AT_KEY = 'authSavedAt';
+const HISTORY_ALERTS_KEY = 'history_alerts';
+const HISTORY_NEWS_KEY = 'history_news';
+const HISTORY_SURVEYS_KEY = 'history_surveys';
+const HISTORY_SUBMITTED_KEY = 'history_submitted_campaigns';
 
 type AlertData = {
   id?: string;
@@ -110,6 +117,12 @@ async function loadDeviceId(): Promise<string> {
   return id;
 }
 
+function getInitials(name: string): string {
+  const parts = name.trim().split(/[\s_]+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  return parts.map((p) => p[0].toUpperCase()).slice(0, 2).join('');
+}
+
 function luminance(hex: string): number {
   const c = hex.replace('#', '');
   const r = parseInt(c.substring(0, 2), 16);
@@ -135,6 +148,9 @@ export default function App() {
   const [status, setStatus] = useState('Starting...');
   const [activeTab, setActiveTab] = useState<'alerts' | 'news' | 'surveys'>('alerts');
   const [alertHistory, setAlertHistory] = useState<(AlertData & { ts: Date })[]>([]);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submittedCampaigns, setSubmittedCampaigns] = useState<Set<string>>(new Set());
   const pulse = useRef(new Animated.Value(1)).current;
   const deviceId = useRef('');
   const localIp = useRef('0.0.0.0');
@@ -142,9 +158,7 @@ export default function App() {
   const tokenRef = useRef<string | null>(null);
   const appStateRef = useRef(AppState.currentState);
   const newsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const AUTH_TOKEN_KEY = 'authToken';
-  const AUTH_USERNAME_KEY = 'authUsername';
-  const AUTH_SAVED_AT_KEY = 'authSavedAt';
+  const surveySubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -178,10 +192,51 @@ export default function App() {
         }
       } catch {}
 
+      try {
+        const [alertsJson, newsJson, surveysJson, submittedJson] = await Promise.all([
+          AsyncStorage.getItem(HISTORY_ALERTS_KEY),
+          AsyncStorage.getItem(HISTORY_NEWS_KEY),
+          AsyncStorage.getItem(HISTORY_SURVEYS_KEY),
+          AsyncStorage.getItem(HISTORY_SUBMITTED_KEY),
+        ]);
+        if (alertsJson) {
+          const parsed = JSON.parse(alertsJson);
+          setAlertHistory(parsed.map((item: any) => ({ ...item, ts: new Date(item.ts) })));
+        }
+        if (newsJson) setNewsList(JSON.parse(newsJson));
+        if (surveysJson) setSurveyList(JSON.parse(surveysJson));
+        if (submittedJson) setSubmittedCampaigns(new Set(JSON.parse(submittedJson)));
+      } catch {}
+
       setScreen('login');
     })();
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (surveySubmitTimerRef.current) {
+        clearTimeout(surveySubmitTimerRef.current);
+        surveySubmitTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(HISTORY_ALERTS_KEY, JSON.stringify(alertHistory)); } catch {}
+  }, [alertHistory]);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(HISTORY_NEWS_KEY, JSON.stringify(newsList)); } catch {}
+  }, [newsList]);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(HISTORY_SURVEYS_KEY, JSON.stringify(surveyList)); } catch {}
+  }, [surveyList]);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(HISTORY_SUBMITTED_KEY, JSON.stringify([...submittedCampaigns])); } catch {}
+  }, [submittedCampaigns]);
 
   const playAlertSound = useCallback(async () => {
   }, []);
@@ -312,11 +367,11 @@ export default function App() {
               } else {
                 showSurveyScreen(payload);
               }
-            } else if (cmd.type === 'it-news-update' && cmd.data) {
+            } else if (cmd.type === 'it-news-update' && payload) {
               if (isBg) {
-                scheduleNotif('news', '📰 ' + cmd.data.title, cmd.data.body || '', { newsData: JSON.stringify(cmd.data) });
+                scheduleNotif('news', '📰 ' + (payload.title || ''), payload.body || '', { newsData: JSON.stringify(payload) });
               } else {
-                showNewsScreen(cmd.data);
+                showNewsScreen(payload);
               }
             } else if (cmd.type === 'it-news-remove') {
               removeNews(cmd.data?.id || cmd.requestId);
@@ -348,7 +403,8 @@ export default function App() {
 
   const handleUserLogin = useCallback(async () => {
     setLoginError('');
-    if (!username.trim() || !password.trim()) { setLoginError('Username and password required'); return; }
+    setLoggingIn(true);
+    if (!username.trim() || !password.trim()) { setLoginError('Username and password required'); setLoggingIn(false); return; }
     try {
       const base = serverInput.trim().replace(/\/+$/, '');
       apiBaseRef.current = base;
@@ -358,7 +414,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password: password.trim() }),
       });
-      if (!res.ok) { setLoginError(`Login failed (${res.status})`); return; }
+      if (!res.ok) { setLoginError(`Login failed (${res.status})`); setLoggingIn(false); return; }
       const data = await res.json();
       tokenRef.current = data.accessToken;
       await AsyncStorage.multiSet([
@@ -366,16 +422,22 @@ export default function App() {
         [AUTH_USERNAME_KEY, username.trim()],
         [AUTH_SAVED_AT_KEY, String(Date.now())],
       ]);
+      setLoggingIn(false);
       setScreen('dashboard');
-    } catch (e: any) { setLoginError(`Connection error: ${e.message}`); }
+    } catch (e: any) { setLoginError(`Connection error: ${e.message}`); setLoggingIn(false); }
   }, [username, password]);
 
-  const handleLogout = useCallback(async () => {
-    tokenRef.current = null;
-    setUsername('');
-    setPassword('');
-    await AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
-    setScreen('login');
+  const handleLogout = useCallback(() => {
+    Alert.alert('Confirm Logout', 'Are you sure you want to log out? You will need to sign in again.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Log Out', style: 'destructive', onPress: async () => {
+        tokenRef.current = null;
+        setUsername('');
+        setPassword('');
+        await AsyncStorage.multiRemove([AUTH_TOKEN_KEY, AUTH_USERNAME_KEY, AUTH_SAVED_AT_KEY]);
+        setScreen('login');
+      }},
+    ]);
   }, []);
 
   const handleAcknowledge = useCallback(async () => {
@@ -408,18 +470,22 @@ export default function App() {
       }
     }
     if (missing.length > 0) { Alert.alert('Required questions', 'Please answer: ' + missing.join(', ')); return; }
+    setSubmitting(true);
     const formatted = surveyData.survey.questions.map((q) => ({ questionId: q.id, value: answers[q.id] ?? null }));
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (tokenRef.current) headers['Authorization'] = `Bearer ${tokenRef.current}`;
-      await fetch(`${apiBaseRef.current}/survey/response`, {
+      const res = await fetch(`${apiBaseRef.current}/survey/response`, {
         method: 'POST', headers,
         body: JSON.stringify({ surveyId: surveyData.survey.id, campaignId: surveyData.campaignId, answers: formatted, deviceId: deviceId.current }),
       });
-    } catch {}
+      if (!res.ok) { Alert.alert('Submission Failed', `Server returned ${res.status}. Please try again.`); setSubmitting(false); return; }
+    } catch (e: any) { Alert.alert('Submission Failed', `Network error: ${e.message}`); setSubmitting(false); return; }
+    setSubmittedCampaigns((prev) => new Set(prev).add(surveyData.campaignId));
     setSurveySubmitted(true);
+    setSubmitting(false);
     Alert.alert('Submitted', 'Survey response submitted.');
-    setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('dashboard'); }, 1500);
+    surveySubmitTimerRef.current = setTimeout(() => { setSurveyData(null); setSurveySubmitted(false); setScreen('dashboard'); }, 1500);
   }, [surveyData, answers, surveySubmitted]);
 
   const renderQuestion = (q: SurveyQuestion, idx: number) => {
@@ -512,7 +578,7 @@ export default function App() {
         <TextInput style={styles.input} placeholder="Server address (http://ip:3000)" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
         <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
         <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
-        <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin}><Text style={styles.loginBtnText}>Sign In</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn}><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
         {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
       </View>
     );
@@ -607,7 +673,7 @@ export default function App() {
           {surveySubmitted ? (
             <Text style={{ color: '#4caf50', fontSize: 18, textAlign: 'center', marginTop: 20 }}>✓ Submitted</Text>
           ) : (
-            <TouchableOpacity style={styles.submitBtn} onPress={submitSurvey}><Text style={styles.submitBtnText}>Submit</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.submitBtn} onPress={submitSurvey} disabled={submitting}><Text style={styles.submitBtnText}>{submitting ? 'Submitting...' : 'Submit'}</Text></TouchableOpacity>
           )}
         </ScrollView>
       </View>
@@ -658,14 +724,14 @@ export default function App() {
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
             <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>Live</Text></View>
-            <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>MO</Text></TouchableOpacity>
+            <TouchableOpacity onPress={handleLogout} style={styles.avatar}><Text style={styles.avatarText}>{getInitials(username)}</Text></TouchableOpacity>
           </View>
         </View>
 
         <View style={styles.tabBar}>
           {(['alerts', 'news', 'surveys'] as const).map((t) => (
             <TouchableOpacity key={t} style={[styles.tab, activeTab === t && styles.tabActive]} onPress={() => setActiveTab(t)}>
-              <Text style={[styles.tabText, activeTab === t && styles.tabTextActive]}>{t === 'alerts' ? 'Alerts' : t === 'news' ? 'News' : 'Surveys'}</Text>
+              <Text style={[styles.tabText, activeTab === t && styles.tabTextActive]}>{t === 'alerts' ? `Alerts (${alertHistory.length})` : t === 'news' ? `News (${newsList.length})` : `Surveys (${surveyList.length})`}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -722,7 +788,7 @@ export default function App() {
                 <View style={styles.emptyState}><Text style={styles.emptyText}>No surveys received yet</Text></View>
               ) : (
                 surveyList.map((item) => {
-                  const submitted = item.campaignId === surveyData?.campaignId && surveySubmitted;
+                  const submitted = submittedCampaigns.has(item.campaignId);
                   return (
                     <View key={item.campaignId} style={styles.surveyCard}>
                       <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.survey.title}</Text>
