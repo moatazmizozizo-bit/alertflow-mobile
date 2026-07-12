@@ -1,14 +1,15 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions,
-  Animated, Platform, ScrollView, Alert, AppState, Image,
-  RefreshControl, KeyboardAvoidingView,
+  Animated, Platform, ScrollView, Alert, AppState, Image, Modal,
+  RefreshControl, KeyboardAvoidingView, Switch,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Speech from 'expo-speech';
+import { Audio } from 'expo-av';
+import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import iconPng from './assets/alertflow-icon.png';
-import logoPng from './assets/alertflow-logo.png';
 import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
 
 const WS_PORT = 3004;
@@ -21,6 +22,8 @@ const HISTORY_ALERTS_KEY = 'history_alerts';
 const HISTORY_NEWS_KEY = 'history_news';
 const HISTORY_SURVEYS_KEY = 'history_surveys';
 const HISTORY_SUBMITTED_KEY = 'history_submitted_campaigns';
+const SETTINGS_KEY = 'user_settings';
+const ACKED_KEY = 'acknowledged_alerts';
 
 type AlertData = {
   id?: string;
@@ -103,6 +106,21 @@ function codeIcon(code?: string): string {
   return CODE_ICONS[code] || '🚨';
 }
 
+const CODE_MEANINGS: Record<string, string> = {
+  CODE_RED: 'Fire, explosion, rescue, HazMat',
+  CODE_BLUE: 'Cardiac arrest, medical emergency',
+  CODE_YELLOW: 'Bomb threat, suspicious package',
+  CODE_ORANGE: 'HazMat, chemical spill, contamination',
+  CODE_GREEN: 'Evacuation, shelter-in-place lift',
+  CODE_PURPLE: 'Child abduction, missing person',
+  CODE_PINK: 'Infant abduction, pediatric emergency',
+  CODE_WHITE: 'All clear, situation resolved',
+  CODE_BLACK: 'Bomb, explosive device, active shooter',
+  CODE_GRAY: 'Security threat, intruder, lock down',
+  CODE_SILVER: 'Active shooter, weapons incident',
+  CODE_BROWN: 'Severe weather, tornado, natural disaster',
+};
+
 function displayLabel(data: AlertData): string {
   if (data.label) return data.label;
   if (data.code) return data.code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -167,7 +185,15 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [submittedCampaigns, setSubmittedCampaigns] = useState<Set<string>>(new Set());
   const [viewedNewsIds, setViewedNewsIds] = useState<Set<string>>(new Set());
+  const [acknowledgedAlertIds, setAcknowledgedAlertIds] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showCodeRef, setShowCodeRef] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [voiceToggle, setVoiceToggle] = useState(true);
+  const [volumeLevel, setVolumeLevel] = useState(80);
+  const [alertHistFull, setAlertHistFull] = useState(false);
+  const [ackOverlay, setAckOverlay] = useState(false);
   const [connState, setConnState] = useState<'live' | 'reconnecting' | 'offline'>('live');
   const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
   const [pendingNotifs, setPendingNotifs] = useState<{ type: string; title: string; body: string; ts: number }[]>([]);
@@ -231,6 +257,20 @@ export default function App() {
         if (surveysJson) setSurveyList(JSON.parse(surveysJson));
         if (submittedJson) setSubmittedCampaigns(new Set(JSON.parse(submittedJson)));
       } catch {}
+      try {
+        const [ackedJson, settingsJson] = await Promise.all([
+          AsyncStorage.getItem(ACKED_KEY),
+          AsyncStorage.getItem(SETTINGS_KEY),
+        ]);
+        if (ackedJson) setAcknowledgedAlertIds(new Set(JSON.parse(ackedJson)));
+        if (settingsJson) {
+          try {
+            const s = JSON.parse(settingsJson);
+            if (typeof s.voiceToggle === 'boolean') setVoiceToggle(s.voiceToggle);
+            if (typeof s.volumeLevel === 'number') setVolumeLevel(s.volumeLevel);
+          } catch {}
+        }
+      } catch {}
       await loadPendingNotifs();
 
       setScreen('login');
@@ -267,8 +307,22 @@ export default function App() {
     try { AsyncStorage.setItem(HISTORY_SUBMITTED_KEY, JSON.stringify([...submittedCampaigns])); } catch {}
   }, [submittedCampaigns]);
 
+  useEffect(() => {
+    try { AsyncStorage.setItem(ACKED_KEY, JSON.stringify([...acknowledgedAlertIds])); } catch {}
+  }, [acknowledgedAlertIds]);
+
+  useEffect(() => {
+    try { AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ voiceToggle, volumeLevel })); } catch {}
+  }, [voiceToggle, volumeLevel]);
+
   const playAlertSound = useCallback(async () => {
-  }, []);
+    try {
+      const { sound } = await Audio.Sound.createAsync(require('./assets/beep.wav'), { volume: volumeLevel / 100 });
+      await sound.playAsync();
+      sound.setOnPlaybackStatusUpdate((status) => { if (status.isLoaded && status.didJustFinish) sound.unloadAsync(); });
+    } catch {}
+    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); } catch {}
+  }, [volumeLevel]);
 
   const speakRepeated = useCallback(async (text: string, rate: number, pitch: number, volume: number) => {
     for (let i = 0; i < 3; i++) {
@@ -531,6 +585,12 @@ export default function App() {
         });
         if (!res.ok) { Alert.alert('Acknowledge Failed', `Server returned ${res.status}. Try again.`); return; }
       }
+      const ackedId = alert.id;
+      if (ackedId) setAcknowledgedAlertIds((prev) => new Set(prev).add(ackedId));
+      try { await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+      setAckOverlay(true);
+      await new Promise((r) => setTimeout(r, 700));
+      setAckOverlay(false);
     } catch (e: any) { Alert.alert('Acknowledge Failed', `Network error: ${e.message}.`); return; }
     setAlert(null);
     setScreen('dashboard');
@@ -552,6 +612,20 @@ export default function App() {
       item.codeDoc ? `\n${item.codeDoc}` : '',
     ].filter(Boolean).join('\n');
     Alert.alert(displayLabel(item), msg || 'No additional details.');
+  }, []);
+
+  const handleSaveSettings = useCallback(async (s: string) => {
+    setServerInput(s);
+    apiBaseRef.current = s;
+    await saveApiBase(s);
+  }, []);
+
+  const handleSaveVoice = useCallback(async (v: boolean) => {
+    setVoiceToggle(v);
+  }, []);
+
+  const handleSaveVolume = useCallback(async (v: number) => {
+    setVolumeLevel(v);
   }, []);
 
   const updateAnswer = useCallback((questionId: string, value: string | string[] | number) => {
@@ -604,7 +678,14 @@ export default function App() {
           <View key={q.id} style={styles.questionBlock}>
             <Text style={styles.questionText}>{idx + 1}. {q.text}{q.isRequired ? ' *' : ''}</Text>
             {(q.options || []).map((opt) => (
-              <TouchableOpacity key={opt} style={[styles.choiceBtn, answer === opt && styles.choiceSelected]} onPress={() => updateAnswer(q.id, opt)}><Text style={styles.choiceText}>{answer === opt ? '● ' : '○ '}{opt}</Text></TouchableOpacity>
+              <TouchableOpacity key={opt} style={[styles.choiceBtn, answer === opt && styles.choiceSelected]} onPress={() => updateAnswer(q.id, opt)}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={{ width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: answer === opt ? '#3a7bd5' : '#ffffff60', alignItems: 'center', justifyContent: 'center' }}>
+                    {answer === opt && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#3a7bd5' }} />}
+                  </View>
+                  <Text style={styles.choiceText}>{opt}</Text>
+                </View>
+              </TouchableOpacity>
             ))}
           </View>
         );
@@ -642,6 +723,7 @@ export default function App() {
           <View key={q.id} style={styles.questionBlock}>
             <Text style={styles.questionText}>{idx + 1}. {q.text}{q.isRequired ? ' *' : ''}</Text>
             <TextInput style={styles.textAnswer} value={String(answer || '')} onChangeText={(v) => updateAnswer(q.id, v)} placeholder="Type your answer..." placeholderTextColor="#ffffff60" multiline maxLength={2000} />
+            <Text style={{ color: '#ffffff40', fontSize: 11, textAlign: 'right', marginTop: 4 }}>{String(answer || '').length}/2000</Text>
           </View>
         );
       default: return null;
@@ -674,12 +756,21 @@ export default function App() {
             </View>
           </View>
           <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
-          <TextInput style={styles.input} placeholder="Server address (http://ip:3000)" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
+          <TextInput style={styles.input} placeholder="http://192.168.1.x:3000" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" />
           <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" />
           <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry />
           <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn} accessible={true} accessibilityLabel="Sign in" accessibilityRole="button"><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
           {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
-          <Text style={{ color: '#ffffff20', fontSize: 11, textAlign: 'center', marginTop: 20 }}>Make sure the server address is correct and the backend is running on port 3000.</Text>
+          <TouchableOpacity onPress={() => setShowAdvanced((p) => !p)} style={{ marginTop: 8 }}>
+            <Text style={{ color: '#ffffff40', fontSize: 12, fontWeight: '600' }}>{showAdvanced ? '▾ Advanced' : '▸ Advanced'}</Text>
+          </TouchableOpacity>
+          {showAdvanced && (
+            <View style={{ width: '100%', maxWidth: 400, marginTop: 4, padding: 12, backgroundColor: '#ffffff08', borderRadius: 8 }}>
+              <Text style={{ color: '#ffffff60', fontSize: 12, lineHeight: 18 }}>
+                The app auto-discovers the backend on your local network. Only set a custom address if auto-discovery fails or the server is on a different subnet. The backend runs on port 3000 by default.
+              </Text>
+            </View>
+          )}
         </View>
       </KeyboardAvoidingView>
     );
@@ -768,6 +859,12 @@ export default function App() {
             </TouchableOpacity>
           </View>
         </View>
+        {ackOverlay && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: light ? '#ffffffdd' : '#000000dd' }}>
+            <Text style={{ fontSize: 48, color: light ? '#000' : '#fff', fontWeight: '800' }}>✓</Text>
+            <Text style={{ fontSize: 20, color: light ? '#000' : '#fff', fontWeight: '600', marginTop: 8 }}>Acknowledged</Text>
+          </View>
+        )}
       </View>
     );
   }
@@ -844,10 +941,13 @@ export default function App() {
             <Image source={iconPng} style={styles.topIcon} resizeMode="contain" />
             <View>
               <Text style={{ color: '#fff', fontSize: 19, fontWeight: '800' }}>AlertFlow</Text>
-              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center</Text>
+              <Text style={{ color: '#5d6b86', fontSize: 10.5, fontWeight: '600', letterSpacing: 1.6, textTransform: 'uppercase' }}>Command Center · v1.0.0</Text>
             </View>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <TouchableOpacity onPress={() => setShowCodeRef(true)} style={{ paddingHorizontal: 6, paddingVertical: 4 }}>
+              <Text style={{ fontSize: 18 }}>📖</Text>
+            </TouchableOpacity>
             <View style={[
               styles.livePill,
               connState === 'reconnecting' && styles.reconnectingPill,
@@ -866,7 +966,12 @@ export default function App() {
                 {connState === 'live' ? 'Live' : connState === 'reconnecting' ? 'Reconnecting' : 'Offline'}
               </Text>
             </View>
-            <TouchableOpacity onPress={handleLogout} style={styles.avatar} accessible={true} accessibilityLabel="Log out" accessibilityRole="button"><Text style={styles.avatarText}>{getInitials(username)}</Text></TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.avatar} accessible={true} accessibilityLabel="Settings">
+              <Text style={styles.avatarText}>⚙</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleLogout} style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#ffffff20', alignItems: 'center', justifyContent: 'center' }} accessible={true} accessibilityLabel="Log out" accessibilityRole="button">
+              <Text style={styles.avatarText}>{getInitials(username)}</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -918,33 +1023,40 @@ export default function App() {
             <>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                 <Text style={styles.sectionTitle}>Alert History</Text>
-                {recentAlerts.length > 0 && (
+                {alertHistory.length > 0 && (
                   <TouchableOpacity onPress={() => setAlertHistory([])}>
                     <Text style={{ color: '#f87171', fontSize: 12, fontWeight: '600' }}>Clear All</Text>
                   </TouchableOpacity>
                 )}
               </View>
-              {recentAlerts.length === 0 ? (
+              {alertHistory.length === 0 ? (
                 <View style={styles.emptyState}><Text style={styles.emptyText}>No alerts received yet</Text></View>
               ) : (
-                recentAlerts.map((item, idx) => {
+                (alertHistFull ? alertHistory : alertHistory.slice(0, 10)).map((item, idx) => {
                   const loc = item.incidentLocation || item.codeLocation || item.locationName || '';
                   const title = [displayLabel(item), loc ? `in ${loc}` : ''].join(' ');
                   const bg = item.color || codeColor(item.code);
+                  const acked = item.id ? acknowledgedAlertIds.has(item.id) : false;
                   return (
-                    <TouchableOpacity key={idx} style={styles.alertItem} onPress={() => showAlertDetail(item)} activeOpacity={0.7}>
+                    <TouchableOpacity key={idx} style={[styles.alertItem, { opacity: acked ? 0.65 : 1 }]} onPress={() => showAlertDetail(item)} activeOpacity={0.7}>
                       <View style={[styles.cardBar, { backgroundColor: bg }]} />
+                      {!acked && <View style={{ position: 'absolute', left: 14, top: 12, width: 8, height: 8, borderRadius: 4, backgroundColor: '#ef4444', zIndex: 2 }} />}
                       <View style={[styles.alertIconBadge, { backgroundColor: bg + '30', borderColor: bg }]}>
                         <Text style={{ fontSize: 14 }}>{codeIcon(item.code)}</Text>
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.alertItemTitle}>{title}</Text>
+                        <Text style={[styles.alertItemTitle, acked && { fontWeight: '400', color: '#ffffff99' }]}>{title}</Text>
                         {item.message ? <Text style={styles.alertItemMeta}>{item.message}</Text> : null}
                       </View>
                       <Text style={{ color: '#ffffff40', fontSize: 11 }}>{formatTime(item.ts)}</Text>
                     </TouchableOpacity>
                   );
                 })
+              )}
+              {!alertHistFull && alertHistory.length > 10 && (
+                <TouchableOpacity onPress={() => setAlertHistFull(true)} style={{ paddingVertical: 12, alignItems: 'center' }}>
+                  <Text style={{ color: '#3a7bd5', fontSize: 13, fontWeight: '600' }}>Show all ({alertHistory.length})</Text>
+                </TouchableOpacity>
               )}
             </>
           )}
@@ -965,8 +1077,9 @@ export default function App() {
                 newsList.map((item) => {
                   const viewed = viewedNewsIds.has(item.id);
                   return (
-                    <View key={item.id} style={[styles.newsCard, { opacity: viewed ? 0.6 : 1 }]}>
+                    <TouchableOpacity key={item.id} style={[styles.newsCard, { opacity: viewed ? 0.65 : 1 }]} onPress={() => showNewsScreen(item)} activeOpacity={0.8}>
                       <View style={[styles.cardBar, { backgroundColor: item.type === 'card' ? '#9c27b0' : '#3a7bd5' }]} />
+                      {!viewed && <View style={{ position: 'absolute', left: 14, top: 12, width: 8, height: 8, borderRadius: 4, backgroundColor: '#3b82f6', zIndex: 2 }} />}
                       <TouchableOpacity style={{ position: 'absolute', right: 6, top: 6, zIndex: 1, width: 24, height: 24, borderRadius: 12, backgroundColor: '#ffffff15', alignItems: 'center', justifyContent: 'center' }} onPress={() => removeNews(item.id)}>
                         <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700' }}>✕</Text>
                       </TouchableOpacity>
@@ -975,7 +1088,7 @@ export default function App() {
                       </View>
                       <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.title}</Text>
                       {item.body ? <Text style={{ color: '#ffffff99', fontSize: 14, lineHeight: 20 }} numberOfLines={3}>{item.body}</Text> : null}
-                    </View>
+                    </TouchableOpacity>
                   );
                 })
               )}
@@ -1001,10 +1114,11 @@ export default function App() {
                   const expired = expDate && expDate < new Date();
                   return (
                     <View key={item.campaignId} style={styles.surveyCard}>
+                      {!submitted && !expired && <View style={{ position: 'absolute', left: 14, top: 12, width: 8, height: 8, borderRadius: 4, backgroundColor: '#f59e0b', zIndex: 2 }} />}
                       <View style={[styles.cardBar, { backgroundColor: submitted ? '#4caf50' : expired ? '#6b7280' : '#3a7bd5' }]} />
                       <Text style={{ color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 4 }}>{item.survey.title}</Text>
                       {item.survey.description ? <Text style={{ color: '#ffffff80', fontSize: 13, marginBottom: 6 }}>{item.survey.description}</Text> : null}
-                      <Text style={{ color: '#ffffff50', fontSize: 11, marginBottom: 10 }}>
+                      <Text style={{ color: '#ffffff80', fontSize: 11, marginBottom: 10 }}>
                         {item.survey.questions.length} questions
                         {expDate ? `  ·  Expires ${expDate.toLocaleDateString()}` : ''}
                       </Text>
@@ -1024,8 +1138,73 @@ export default function App() {
             </>
           )}
 
-          {activeTab === 'alerts' && <Text style={{ color: '#ffffff30', fontSize: 11, textAlign: 'center', marginTop: 20 }}>AlertFlow Mobile v1.0.0</Text>}
         </ScrollView>
+
+        {/* === SETTINGS MODAL === */}
+        <Modal visible={showSettings} transparent animationType="slide" onRequestClose={() => setShowSettings(false)}>
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000080' }}>
+              <View style={{ backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 36, maxHeight: '85%' }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+                  <Text style={{ color: '#fff', fontSize: 20, fontWeight: '800' }}>Settings</Text>
+                  <TouchableOpacity onPress={() => setShowSettings(false)}><Text style={{ color: '#7bb3ff', fontSize: 15, fontWeight: '600' }}>Done</Text></TouchableOpacity>
+                </View>
+
+                <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Server</Text>
+                <TextInput style={[styles.input, { marginBottom: 16 }]} value={serverInput} onChangeText={(v) => handleSaveSettings(v)} autoCapitalize="none" keyboardType="url" placeholder="Server address" placeholderTextColor="#ffffff60" />
+
+                <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Voice & Sound</Text>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <Text style={{ color: '#ffffffcc', fontSize: 15 }}>Voice announcements</Text>
+                  <Switch value={voiceToggle} onValueChange={handleSaveVoice} trackColor={{ false: '#ffffff30', true: '#3a7bd580' }} thumbColor={voiceToggle ? '#3a7bd5' : '#ffffff60'} />
+                </View>
+                <View style={{ marginBottom: 24 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ color: '#ffffffcc', fontSize: 15 }}>Volume</Text>
+                    <Text style={{ color: '#ffffff80', fontSize: 13 }}>{volumeLevel}%</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{ color: '#ffffff40', fontSize: 11 }}>🔈</Text>
+                    <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: '#ffffff20', overflow: 'hidden' }}>
+                      <View style={{ width: `${volumeLevel}%`, height: '100%', backgroundColor: '#3a7bd5', borderRadius: 3 }} />
+                    </View>
+                    <Text style={{ color: '#ffffff40', fontSize: 11 }}>🔊</Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity onPress={() => { setShowSettings(false); handleLogout(); }} style={{ width: '100%', paddingVertical: 14, borderRadius: 12, backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440', alignItems: 'center' }}>
+                  <Text style={{ color: '#ef4444', fontSize: 16, fontWeight: '700' }}>Log Out</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+
+        {/* === CODE REFERENCE MODAL === */}
+        <Modal visible={showCodeRef} transparent animationType="slide" onRequestClose={() => setShowCodeRef(false)}>
+          <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000080' }}>
+            <View style={{ backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 36, maxHeight: '85%' }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                <Text style={{ color: '#fff', fontSize: 20, fontWeight: '800' }}>Code Reference</Text>
+                <TouchableOpacity onPress={() => setShowCodeRef(false)}><Text style={{ color: '#7bb3ff', fontSize: 15, fontWeight: '600' }}>Done</Text></TouchableOpacity>
+              </View>
+              <ScrollView style={{ maxHeight: 500 }}>
+                {Object.keys(CODE_COLORS).map((code) => (
+                  <View key={code} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#ffffff08' }}>
+                    <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: CODE_COLORS[code] + '30', borderWidth: 1.5, borderColor: CODE_COLORS[code], alignItems: 'center', justifyContent: 'center' }}>
+                      <Text style={{ fontSize: 16 }}>{CODE_ICONS[code] || '🚨'}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: '#ffffffcc', fontSize: 14, fontWeight: '700' }}>{code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}</Text>
+                      <Text style={{ color: '#ffffff80', fontSize: 12, marginTop: 1 }}>{CODE_MEANINGS[code] || ''}</Text>
+                    </View>
+                    <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: CODE_COLORS[code] }} />
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -1044,7 +1223,7 @@ const styles = StyleSheet.create({
   brandIcon: { width: 56, height: 56, borderRadius: 14, backgroundColor: '#0c1428', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#1a2a5e' },
   brandLetters: { fontSize: 22, fontWeight: '900', color: '#3B82F6', letterSpacing: -1 },
   brandTitle: { fontSize: 26, fontWeight: '800', color: '#ffffffcc', letterSpacing: -0.3 },
-  brandSub: { fontSize: 12, color: '#ffffff60', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
+  brandSub: { fontSize: 12, color: '#ffffff99', fontWeight: '400', letterSpacing: 2, textTransform: 'uppercase' },
   topBar: { width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, paddingBottom: 14, paddingHorizontal: 20, flexShrink: 0 },
   topIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: '#0c1428', borderWidth: 1, borderColor: '#ffffff10' },
   livePill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: '#22c55e1f', borderWidth: 1, borderColor: '#22c55e40' },
@@ -1105,5 +1284,5 @@ const styles = StyleSheet.create({
   submitBtn: { width: '100%', padding: 14, borderRadius: 8, backgroundColor: '#4caf50', alignItems: 'center', marginTop: 10 },
   submitBtnText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   emptyState: { alignItems: 'center', paddingVertical: 50 },
-  emptyText: { color: '#ffffff30', fontSize: 14 },
+  emptyText: { color: '#ffffff50', fontSize: 14 },
 });
