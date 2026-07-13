@@ -13,8 +13,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import iconPng from './assets/alertflow-icon.png';
 import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
+import Constants from 'expo-constants';
 import { colors, spacing, typography } from './src/theme';
 import * as api from './src/services/api';
+import * as notifications from './src/services/notifications';
 import { log } from './src/utils/log';
 
 const WS_PORT = 3004;
@@ -32,6 +34,7 @@ const ACKED_KEY = 'acknowledged_alerts';
 const PENDING_ACKS_KEY = 'pending_ack_retries';
 const FILTER_DURATION_KEY = 'filter_duration';
 const FILTER_SEVERITY_KEY = 'filter_severity';
+const PUSH_TOKEN_KEY = 'push_token';
 
 type AlertData = {
   id?: string;
@@ -263,6 +266,7 @@ function AppContent() {
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [codesApiData, setCodesApiData] = useState<api.CodeEntity[] | null>(null);
   const [showManualServer, setShowManualServer] = useState(false);
+  const [pushToken, setPushToken] = useState<string | null>(null);
   const connToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -370,6 +374,11 @@ function AppContent() {
       } catch { log.warn('Failed to load filter preferences'); }
 
       try {
+        const savedPushToken = await AsyncStorage.getItem(PUSH_TOKEN_KEY);
+        if (savedPushToken) setPushToken(savedPushToken);
+      } catch { log.warn('Failed to load push token'); }
+
+      try {
         const player = createAudioPlayer(require('./assets/beep.wav'));
         soundPlayerRef.current = player;
       } catch { log.warn('Failed to create audio player'); }
@@ -472,7 +481,17 @@ function AppContent() {
       const list = stored ? JSON.parse(stored) : [];
       list.push({ type, title, body, extra, ts: Date.now() });
       await AsyncStorage.setItem('pendingNotifs', JSON.stringify(list.slice(-20)));
-    } catch { log.warn('Failed to schedule notification'); }
+    } catch { log.warn('Failed to persist notification'); }
+    notifications.showLocalNotification({
+      type: type as notifications.AlertFlowNotificationType,
+      id: extra.alertData ? JSON.parse(extra.alertData).id : extra.surveyData ? JSON.parse(extra.surveyData).campaignId : extra.newsData ? JSON.parse(extra.newsData).id : undefined,
+      title,
+      body,
+      data: Object.keys(extra).reduce((acc, k) => {
+        try { acc[k] = JSON.parse(extra[k]); } catch { acc[k] = extra[k]; }
+        return acc;
+      }, {} as Record<string, unknown>),
+    });
   }, []);
 
   const loadPendingNotifs = useCallback(async () => {
@@ -583,7 +602,26 @@ function AppContent() {
           method: 'POST', headers,
           body: JSON.stringify({ deviceId: deviceId.current, acknowledgedBy: username || 'user' }),
         });
-        if (res.ok) {
+      try {
+        const [ackedJson, settingsJson] = await Promise.all([
+          AsyncStorage.getItem(ACKED_KEY),
+          AsyncStorage.getItem(SETTINGS_KEY),
+        ]);
+        if (ackedJson) setAcknowledgedAlertIds(new Set(JSON.parse(ackedJson)));
+        if (settingsJson) {
+          try {
+            const s = JSON.parse(settingsJson);
+            if (typeof s.voiceToggle === 'boolean') setVoiceToggle(s.voiceToggle);
+            if (typeof s.volumeLevel === 'number') setVolumeLevel(s.volumeLevel);
+          } catch { log.warn('Failed to parse settings from storage'); }
+        }
+      } catch { log.warn('Failed to load acked/settings from storage'); }
+      try {
+        const pendingJson = await AsyncStorage.getItem(PENDING_ACKS_KEY);
+        if (pendingJson) setPendingAcks(JSON.parse(pendingJson));
+      } catch { log.warn('Failed to load pending acks from storage'); }
+      await loadPendingNotifs();
+      if (res.ok) {
           log.info('Retried ack succeeded for alert', pa.alertId);
         } else {
           remaining.push(pa);
@@ -707,6 +745,64 @@ function AppContent() {
     return () => sub.remove();
   }, [showAlert, showNewsScreen, showSurveyScreen, doHeartbeat, loadPendingNotifs]);
 
+  const handleNotificationTap = useCallback((nType: notifications.AlertFlowNotificationType, nId?: string) => {
+    if (!nId || screen !== 'dashboard') return;
+    if (nType === 'alert') {
+      const found = alertHistory.find((a) => a.id === nId);
+      if (found) {
+        setScreen('alert');
+        setAlert({
+          id: found.id,
+          code: found.code,
+          label: found.label,
+          color: found.color,
+          message: found.message,
+          incidentLocation: found.incidentLocation,
+          codeLocation: found.codeLocation,
+          createdAt: found.createdAt,
+        });
+      }
+    } else if (nType === 'news') {
+      const found = newsList.find((n) => n.id === nId);
+      if (found) showNewsScreen(found);
+    } else if (nType === 'survey') {
+      const found = surveyList.find((s) => s.campaignId === nId);
+      if (found) showSurveyScreen(found);
+    }
+  }, [alertHistory, newsList, surveyList, screen]);
+
+  const handleNotificationTapRef = useRef(handleNotificationTap);
+  handleNotificationTapRef.current = handleNotificationTap;
+
+  // Notification response listener — handle tap-to-open
+  useEffect(() => {
+    const initial = notifications.checkForPendingNotificationResponse();
+    if (initial) {
+      handleNotificationTapRef.current(initial.type, initial.id);
+    }
+    const sub = notifications.addNotificationResponseListener((nType, nId) => {
+      handleNotificationTapRef.current(nType, nId);
+    });
+    return () => sub.remove();
+  }, []);
+
+  async function initPushNotifications() {
+    try {
+      const granted = await notifications.requestNotificationPermissions();
+      if (!granted) { log.warn('Notification permissions not granted'); return; }
+      const projectId = (Constants as any)?.expoConfig?.extra?.eas?.projectId;
+      if (!projectId) { log.warn('No EAS project ID for push notifications'); return; }
+      const pToken = await notifications.getExpoPushToken(projectId);
+      if (!pToken) { log.warn('Failed to get push token'); return; }
+      setPushToken(pToken);
+      await AsyncStorage.setItem(PUSH_TOKEN_KEY, pToken);
+      await notifications.registerPushTokenWithBackend(
+        apiBaseRef.current, tokenRef.current || '', pToken,
+        deviceId.current, Platform.OS,
+      );
+    } catch { log.warn('Push notification initialization failed'); }
+  }
+
   const handleUserLogin = useCallback(async () => {
     setLoginError('');
     setLoggingIn(true);
@@ -732,6 +828,8 @@ function AppContent() {
       ]);
       setLoggingIn(false);
       setScreen('dashboard');
+      // Register push notifications (non-blocking)
+      initPushNotifications();
       // Background fetch of backend history
       (async () => {
         try {
@@ -817,6 +915,11 @@ function AppContent() {
     Alert.alert('Confirm Logout', 'Are you sure you want to log out? You will need to sign in again.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Log Out', style: 'destructive', onPress: async () => {
+        if (pushToken && tokenRef.current) {
+          await notifications.unregisterPushTokenWithBackend(apiBaseRef.current, tokenRef.current, pushToken).catch(() => {});
+        }
+        setPushToken(null);
+        await AsyncStorage.removeItem(PUSH_TOKEN_KEY);
         tokenRef.current = null;
         setUsername('');
         setPassword('');

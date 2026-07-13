@@ -21,7 +21,11 @@
       "permissions": [
         "INTERNET",
         "ACCESS_WIFI_STATE",
-        "ACCESS_NETWORK_STATE"
+        "ACCESS_NETWORK_STATE",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "SCHEDULE_EXACT_ALARM"
       ]
     },
     "web": {
@@ -35,6 +39,12 @@
       }],
       ["expo-audio", {
         "enableBackgroundPlayback": false
+      }],
+      ["expo-notifications", {
+        "icon": "./assets/notification-icon.png",
+        "color": "#3b82f6",
+        "defaultChannel": "alerts",
+        "enableBackgroundRemoteNotifications": true
       }]
     ],
     "extra": {
