@@ -13,6 +13,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import iconPng from './assets/alertflow-icon.png';
 import { getLocalIp, getApiBase, saveApiBase } from './src/services/config';
+import { colors, spacing, typography } from './src/theme';
+import * as api from './src/services/api';
 import { log } from './src/utils/log';
 
 const WS_PORT = 3004;
@@ -94,9 +96,24 @@ const CODE_COLORS: Record<string, string> = {
   CODE_GRAY: '#616161', CODE_SILVER: '#9e9e9e', CODE_BROWN: '#5d4037',
 };
 
+let _dynamicCodeColors: Record<string, string> = {};
+let _dynamicCodeLabels: Record<string, string> = {};
+let _dynamicCodeMessages: Record<string, string | null | undefined> = {};
+
+export function setDynamicCodes(codes: api.CodeEntity[]): void {
+  _dynamicCodeColors = {};
+  _dynamicCodeLabels = {};
+  _dynamicCodeMessages = {};
+  for (const c of codes) {
+    _dynamicCodeColors[c.code] = c.color;
+    _dynamicCodeLabels[c.code] = c.label;
+    _dynamicCodeMessages[c.code] = c.defaultMessage;
+  }
+}
+
 function codeColor(code?: string): string {
   if (!code) return '#d32f2f';
-  return CODE_COLORS[code] || '#d32f2f';
+  return _dynamicCodeColors[code] || CODE_COLORS[code] || '#d32f2f';
 }
 
 // Icon redundancy for severity: color alone is not accessible (colorblindness,
@@ -242,6 +259,10 @@ function AppContent() {
   const [hasHydrated, setHasHydrated] = useState(false);
   const [durationFilter, setDurationFilter] = useState<'today' | 'week' | 'month' | 'all'>('all');
   const [severityFilter, setSeverityFilter] = useState<Set<string>>(new Set());
+  const [discovering, setDiscovering] = useState(true);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [codesApiData, setCodesApiData] = useState<api.CodeEntity[] | null>(null);
+  const [showManualServer, setShowManualServer] = useState(false);
   const connToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatFailRef = useRef(0);
   const newsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -267,7 +288,18 @@ function AppContent() {
         apiBaseRef.current = await getApiBase();
         setServerInput(apiBaseRef.current);
         setStatus(`Backend: ${apiBaseRef.current}`);
-      } catch (e: any) { setStatus(`Discovery: ${e.message}`); }
+        try {
+          const hc = await fetch(`${apiBaseRef.current}/health`);
+          if (hc.ok) {
+            setDiscoveryError(null);
+          } else {
+            setDiscoveryError('Server not responding as expected');
+          }
+        } catch {
+          setDiscoveryError('Server unreachable after auto-discovery. Verify the backend is running.');
+        }
+      } catch (e: any) { setStatus(`Discovery: ${e.message}`); setDiscoveryError(e.message); }
+      setDiscovering(false);
 
       try {
         let savedToken = await getSecureToken();
@@ -409,6 +441,10 @@ function AppContent() {
     if (!hasHydrated) return;
     try { AsyncStorage.setItem(FILTER_SEVERITY_KEY, JSON.stringify([...severityFilter])); } catch { log.warn('Failed to persist severity filter'); }
   }, [severityFilter, hasHydrated]);
+
+  useEffect(() => {
+    if (codesApiData) setDynamicCodes(codesApiData);
+  }, [codesApiData]);
 
   const playAlertSound = useCallback(async () => {
     try {
@@ -696,6 +732,80 @@ function AppContent() {
       ]);
       setLoggingIn(false);
       setScreen('dashboard');
+      // Background fetch of backend history
+      (async () => {
+        try {
+          const [codes, alerts, news, campaigns] = await Promise.all([
+            api.getCodesApi(apiBaseRef.current, data.accessToken).catch(() => null),
+            api.getAlertsApi(apiBaseRef.current, data.accessToken).catch(() => null),
+            api.getNewsApi(apiBaseRef.current, data.accessToken).catch(() => null),
+            api.getCampaignsApi(apiBaseRef.current, data.accessToken).catch(() => null),
+          ]);
+          if (codes) setCodesApiData(codes);
+          if (alerts) {
+            const mapped = alerts.map((e) => ({
+              id: e.id,
+              code: e.code,
+              label: e.label,
+              color: e.color,
+              message: e.message || undefined,
+              incidentLocation: e.incidentLocation || undefined,
+              codeLocation: e.targetLocationName || undefined,
+              createdAt: typeof e.createdAt === 'string' ? e.createdAt : new Date(e.createdAt).toISOString(),
+              ts: new Date(e.createdAt),
+            }));
+            setAlertHistory((prev) => {
+              const byId = new Map<string, (typeof prev)[0]>();
+              for (const a of prev) { if (a.id) byId.set(a.id, a); }
+              for (const a of mapped) { if (a.id) byId.set(a.id, a); }
+              return [...byId.values()].sort((a, b) => b.ts.getTime() - a.ts.getTime()).slice(0, 200);
+            });
+          }
+          if (news) {
+            const mapped = news.map((e) => ({
+              id: e.id,
+              title: e.title,
+              body: e.body || null,
+              priority: e.priority,
+              startAt: e.startAt ? (typeof e.startAt === 'string' ? e.startAt : new Date(e.startAt).toISOString()) : null,
+              endAt: e.endAt ? (typeof e.endAt === 'string' ? e.endAt : new Date(e.endAt).toISOString()) : null,
+              isActive: e.isActive,
+              type: e.type as 'strip' | 'card',
+              durationSec: e.durationSec,
+              opacity: e.opacity,
+              backgroundColor: e.backgroundColor || null,
+              textColor: e.textColor || null,
+              updatedAt: typeof e.updatedAt === 'string' ? e.updatedAt : new Date(e.updatedAt).toISOString(),
+            }));
+            setNewsList((prev) => {
+              const byId = new Map<string, typeof mapped[0]>();
+              for (const n of prev) byId.set(n.id, n);
+              for (const n of mapped) if (n.isActive) byId.set(n.id, n);
+              return [...byId.values()].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(-50);
+            });
+          }
+          if (campaigns) {
+            const mapped: SurveyData[] = campaigns.map((e) => ({
+              campaignId: e.id,
+              survey: {
+                id: e.surveyId,
+                title: e.surveyTitle || 'Survey',
+                description: null as string | null,
+                isAnonymous: false,
+                allowMultipleSubmissions: false,
+                expiresAt: e.expiresAt ? (typeof e.expiresAt === 'string' ? e.expiresAt : new Date(e.expiresAt).toISOString()) : null,
+                questions: [],
+              },
+            }));
+            setSurveyList((prev) => {
+              const byId = new Map<string, SurveyData>();
+              for (const s of prev) byId.set(s.campaignId, s);
+              for (const s of mapped) byId.set(s.campaignId, s);
+              return [...byId.values()].slice(-50);
+            });
+          }
+        } catch { log.warn('Background history fetch failed'); }
+      })();
     } catch (e: any) {
       if (e.message?.includes('Network request failed')) setLoginError('Cannot reach server. Check the address and ensure the backend is running.');
       else setLoginError(`Connection error: ${e.message}`);
@@ -903,10 +1013,10 @@ function AppContent() {
   // === LOADING ===
   if (screen === 'loading') {
     return (
-      <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
+      <View style={[styles.container, { backgroundColor: colors.bg.primary }]}>
         <Image source={iconPng} style={{ width: 72, height: 72, borderRadius: 16, marginBottom: 16 }} />
-        <Text style={[styles.brandTitle, { color: '#ffffffcc' }]}>AlertFlow</Text>
-        <Text style={[styles.status, { color: '#ffffff60', marginTop: 20 }]}>{status}</Text>
+        <Text style={[styles.brandTitle, { color: colors.text.primary }]}>AlertFlow</Text>
+        <Text style={[styles.status, { color: colors.text.muted, marginTop: 20 }]}>{status}</Text>
       </View>
     );
   }
@@ -915,28 +1025,53 @@ function AppContent() {
   if (screen === 'login') {
     return (
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={[styles.container, { backgroundColor: '#1a1a2e' }]}>
+        <View style={[styles.container, { backgroundColor: colors.bg.primary }]}>
           <View style={styles.brandWrap}>
             <View style={styles.brandIcon}>
-              <Text style={styles.brandLetters}>A<Text style={{ color: '#EF4444' }}>F</Text></Text>
+              <Text style={styles.brandLetters}>A<Text style={{ color: colors.error }}>F</Text></Text>
             </View>
             <View>
               <Text style={styles.brandTitle}>AlertFlow</Text>
               <Text style={styles.brandSub}>Command Center</Text>
             </View>
           </View>
-          <Text style={[styles.status, { color: '#ffffff60', marginBottom: 30 }]}>Sign in to receive alerts</Text>
-          <TextInput style={styles.input} placeholder="http://192.168.1.x:3000" placeholderTextColor="#ffffff60" value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" accessibilityLabel="Server address" />
-          <TextInput style={styles.input} placeholder="Username" placeholderTextColor="#ffffff60" value={username} onChangeText={setUsername} autoCapitalize="none" accessibilityLabel="Username" />
-          <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#ffffff60" value={password} onChangeText={setPassword} secureTextEntry accessibilityLabel="Password" />
-          <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn} accessible={true} accessibilityLabel="Sign in" accessibilityRole="button"><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
+          <Text style={[styles.status, { color: colors.text.muted, marginBottom: 30 }]}>Sign in to receive alerts</Text>
+
+          {discovering ? (
+            <View style={{ width: '100%', maxWidth: 400, alignItems: 'center', marginBottom: 20 }}>
+              <Text style={{ color: colors.text.secondary, fontSize: 14 }}>Discovering server on your network...</Text>
+            </View>
+          ) : discoveryError ? (
+            <>
+              <View style={{ width: '100%', maxWidth: 400, padding: 12, backgroundColor: colors.error + '15', borderRadius: 8, borderWidth: 1, borderColor: colors.error + '30', marginBottom: 12 }}>
+                <Text style={{ color: colors.error, fontSize: 13, textAlign: 'center', lineHeight: 18 }}>{discoveryError}</Text>
+              </View>
+              {!showManualServer && (
+                <TouchableOpacity onPress={() => setShowManualServer(true)} style={{ marginBottom: 12 }}>
+                  <Text style={{ color: colors.accent.light, fontSize: 13, fontWeight: '600' }}>Enter server address manually</Text>
+                </TouchableOpacity>
+              )}
+              {showManualServer && (
+                <TextInput style={[styles.input, { borderColor: colors.error + '60' }]} placeholder="http://192.168.1.x:3000" placeholderTextColor={colors.text.muted} value={serverInput} onChangeText={setServerInput} autoCapitalize="none" keyboardType="url" accessibilityLabel="Server address" />
+              )}
+            </>
+          ) : (
+            <View style={{ width: '100%', maxWidth: 400, marginBottom: 12, padding: 10, borderRadius: 8, backgroundColor: colors.accent.primary + '10', borderWidth: 1, borderColor: colors.accent.primary + '25', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ color: colors.success, fontSize: 12 }}>●</Text>
+              <Text style={{ color: colors.text.secondary, fontSize: 13 }}>Server: {apiBaseRef.current}</Text>
+            </View>
+          )}
+
+          <TextInput style={styles.input} placeholder="Username" placeholderTextColor={colors.text.muted} value={username} onChangeText={setUsername} autoCapitalize="none" accessibilityLabel="Username" />
+          <TextInput style={styles.input} placeholder="Password" placeholderTextColor={colors.text.muted} value={password} onChangeText={setPassword} secureTextEntry accessibilityLabel="Password" />
+          <TouchableOpacity style={styles.loginBtn} onPress={handleUserLogin} disabled={loggingIn || discovering} accessible={true} accessibilityLabel="Sign in" accessibilityRole="button"><Text style={styles.loginBtnText}>{loggingIn ? 'Signing in...' : 'Sign In'}</Text></TouchableOpacity>
           {loginError ? <Text style={styles.error}>{loginError}</Text> : null}
           <TouchableOpacity onPress={() => setShowAdvanced((p) => !p)} style={{ marginTop: 8 }} accessible={true} accessibilityLabel="Toggle advanced settings" accessibilityRole="button">
-            <Text style={{ color: '#ffffff70', fontSize: 12, fontWeight: '600' }}>{showAdvanced ? '▾ Advanced' : '▸ Advanced'}</Text>
+            <Text style={{ color: colors.text.muted, fontSize: 12, fontWeight: '600' }}>{showAdvanced ? '▾ Advanced' : '▸ Advanced'}</Text>
           </TouchableOpacity>
           {showAdvanced && (
-            <View style={{ width: '100%', maxWidth: 400, marginTop: 4, padding: 12, backgroundColor: '#ffffff08', borderRadius: 8 }}>
-              <Text style={{ color: '#ffffff60', fontSize: 12, lineHeight: 18 }}>
+            <View style={{ width: '100%', maxWidth: 400, marginTop: 4, padding: 12, backgroundColor: colors.border.subtle, borderRadius: 8 }}>
+              <Text style={{ color: colors.text.muted, fontSize: 12, lineHeight: 18 }}>
                 The app auto-discovers the backend on your local network. Only set a custom address if auto-discovery fails or the server is on a different subnet. The backend runs on port 3000 by default.
               </Text>
             </View>
@@ -957,6 +1092,7 @@ function AppContent() {
     return (
       <View style={[styles.container, { backgroundColor: bg, paddingTop: insets.top + 20, padding: 0 }]}>
         <StatusBar hidden />
+        <Animated.View style={{ flex: 1, width: '100%', transform: [{ scale: pulse }] }}>
         <ScrollView style={{ flex: 1, width: '100%' }} contentContainerStyle={{ padding: 24, paddingBottom: 16 }}>
           {codeName ? (
             <View style={{ alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingVertical: 7, borderRadius: 999, backgroundColor: light ? '#00000020' : '#ffffff20', marginBottom: 10 }}>
@@ -1011,6 +1147,7 @@ function AppContent() {
             </View>
           ) : null}
         </ScrollView>
+        </Animated.View>
 
         <View style={[styles.alertBtnBar, { backgroundColor: bg, borderTopColor: light ? '#00000020' : '#ffffff25' }]}>
           {!alert.isClear ? (
@@ -1120,6 +1257,9 @@ function AppContent() {
       return filterByDuration(item.updatedAt || item.startAt);
     });
     const filteredSurveys = surveyList; // no timestamp for survey items
+    const codeEntries = codesApiData
+      ? codesApiData.filter((c) => c.isActive).map((c) => ({ code: c.code, color: c.color, icon: CODE_ICONS[c.code] || '🚨' }))
+      : Object.keys(CODE_COLORS).map((code) => ({ code, color: CODE_COLORS[code], icon: CODE_ICONS[code] || '🚨' }));
     const syncText = connState === 'live' && lastHeartbeatAt
       ? `Synced ${Math.floor((clock.getTime() - lastHeartbeatAt) / 1000)}s ago`
       : null;
@@ -1264,7 +1404,7 @@ function AppContent() {
                   style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: !severityFilterActive ? '#3a7bd530' : '#ffffff15', borderWidth: 1, borderColor: !severityFilterActive ? '#3a7bd540' : '#ffffff30' }}>
                   <Text style={{ color: !severityFilterActive ? '#7bb3ff' : '#ffffff99', fontSize: 10, fontWeight: '600' }}>All codes</Text>
                 </TouchableOpacity>
-                {Object.keys(CODE_COLORS).map((code) => {
+                {codeEntries.map(({ code, color, icon }) => {
                   const selected = severityFilter.has(code);
                   return (
                     <TouchableOpacity key={code} onPress={() => {
@@ -1272,9 +1412,9 @@ function AppContent() {
                       if (selected) next.delete(code); else next.add(code);
                       setSeverityFilter(next.size ? next : new Set());
                     }}
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: selected ? CODE_COLORS[code] + '40' : '#ffffff10', borderWidth: 1, borderColor: selected ? CODE_COLORS[code] : '#ffffff20' }}>
-                      <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: CODE_COLORS[code] }} />
-                      <Text style={{ fontSize: 11 }}>{CODE_ICONS[code] || '🚨'}</Text>
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: selected ? color + '40' : '#ffffff10', borderWidth: 1, borderColor: selected ? color : '#ffffff20' }}>
+                      <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color }} />
+                      <Text style={{ fontSize: 11 }}>{icon}</Text>
                     </TouchableOpacity>
                   );
                 })}
@@ -1444,10 +1584,11 @@ function AppContent() {
                 </View>
 
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>Server</Text>
-                  {showSaved ? <Text style={{ color: '#4caf50', fontSize: 12, fontWeight: '600' }}>✓ Saved</Text> : null}
+                  <Text style={{ color: colors.text.muted, fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>Server</Text>
                 </View>
-                <TextInput style={[styles.input, { marginBottom: 16 }]} value={serverInput} onChangeText={(v) => handleSaveSettings(v)} autoCapitalize="none" keyboardType="url" placeholder="Server address" placeholderTextColor="#ffffff60" />
+                <View style={{ width: '100%', padding: 14, borderRadius: 8, backgroundColor: colors.bg.secondary, borderWidth: 1, borderColor: colors.border.subtle, marginBottom: 16 }}>
+                  <Text style={{ color: colors.text.secondary, fontSize: 14 }}>{apiBaseRef.current}</Text>
+                </View>
 
                 <Text style={{ color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Voice & Sound</Text>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -1493,18 +1634,25 @@ function AppContent() {
                 <TouchableOpacity onPress={() => setShowCodeRef(false)}><Text style={{ color: '#7bb3ff', fontSize: 15, fontWeight: '600' }}>Done</Text></TouchableOpacity>
               </View>
               <ScrollView style={{ maxHeight: 500 }}>
-                {Object.keys(CODE_COLORS).map((code) => (
-                  <View key={code} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#ffffff08' }}>
-                    <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: CODE_COLORS[code] + '30', borderWidth: 1.5, borderColor: CODE_COLORS[code], alignItems: 'center', justifyContent: 'center' }}>
-                      <Text style={{ fontSize: 16 }}>{CODE_ICONS[code] || '🚨'}</Text>
+                {(codesApiData ? codesApiData.filter((c) => c.isActive) : Object.keys(CODE_COLORS).map((k) => ({ code: k, color: CODE_COLORS[k], label: k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()), defaultMessage: CODE_MEANINGS[k] }))).map((entry) => {
+                  const code = entry.code;
+                  const color = 'color' in entry ? entry.color : '#d32f2f';
+                  const label = 'label' in entry ? entry.label : code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+                  const desc = 'defaultMessage' in entry ? (entry.defaultMessage || '') : '';
+                  const icon = CODE_ICONS[code] || '🚨';
+                  return (
+                    <View key={code} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#ffffff08' }}>
+                      <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: color + '30', borderWidth: 1.5, borderColor: color, alignItems: 'center', justifyContent: 'center' }}>
+                        <Text style={{ fontSize: 16 }}>{icon}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#ffffffcc', fontSize: 14, fontWeight: '700' }}>{label}</Text>
+                        <Text style={{ color: '#ffffff80', fontSize: 12, marginTop: 1 }}>{desc}</Text>
+                      </View>
+                      <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: color }} />
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ color: '#ffffffcc', fontSize: 14, fontWeight: '700' }}>{code.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}</Text>
-                      <Text style={{ color: '#ffffff80', fontSize: 12, marginTop: 1 }}>{CODE_MEANINGS[code] || ''}</Text>
-                    </View>
-                    <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: CODE_COLORS[code] }} />
-                  </View>
-                ))}
+                  );
+                })}
               </ScrollView>
             </View>
           </View>
@@ -1528,7 +1676,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   status: { fontSize: 14, textAlign: 'center' },
   input: { width: '100%', maxWidth: 400, padding: 14, fontSize: 16, backgroundColor: '#ffffff15', borderRadius: 8, color: '#fff', marginBottom: 12, borderWidth: 1, borderColor: '#ffffff30' },
-  loginBtn: { width: '100%', maxWidth: 400, padding: 14, borderRadius: 8, backgroundColor: '#3a7bd5', alignItems: 'center' },
+  loginBtn: { width: '100%', maxWidth: 400, padding: 14, borderRadius: 8, backgroundColor: '#3a7bd5', alignItems: 'center', shadowColor: '#3a7bd5', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.3, shadowRadius: 6, elevation: 4 },
   loginBtnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   error: { color: '#ff6b6b', marginTop: 12, fontSize: 14, textAlign: 'center' },
   brandWrap: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 36 },
@@ -1568,7 +1716,7 @@ const styles = StyleSheet.create({
   tabText: { color: '#8a97b0', fontSize: 13.5, fontWeight: '600' },
   tabTextActive: { color: '#ffffff' },
   sectionTitle: { color: '#ffffff80', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 },
-  alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 8, position: 'relative', overflow: 'hidden' },
+  alertItem: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, backgroundColor: '#1a1f35', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 8, position: 'relative', overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 3 },
   alertDot: { width: 12, height: 12, borderRadius: 6, flexShrink: 0 },
   alertItemTitle: { color: '#ffffffcc', fontSize: 15, fontWeight: '600' },
   alertItemMeta: { color: '#ffffff60', fontSize: 12, marginTop: 2 },
@@ -1582,9 +1730,9 @@ const styles = StyleSheet.create({
   alertBtnBar: { width: '100%', paddingHorizontal: 24, paddingTop: 12, paddingBottom: 28, borderTopWidth: 1, gap: 8, flexShrink: 0 },
   alertBtnPrimary: { width: '100%', paddingVertical: 16, borderRadius: 14, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 3 },
   alertBtnSecondary: { width: '100%', paddingVertical: 10, alignItems: 'center' },
-  newsCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden' },
+  newsCard: { padding: 18, backgroundColor: '#1a1f35', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 3 },
   newsTag: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 2, borderRadius: 4, marginBottom: 8 },
-  surveyCard: { padding: 18, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden' },
+  surveyCard: { padding: 18, backgroundColor: '#1a1f35', borderWidth: 1, borderColor: '#ffffff10', borderRadius: 14, marginBottom: 12, position: 'relative', overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 4, elevation: 3 },
   fillBtn: { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 8, backgroundColor: '#3a7bd5', borderRadius: 6 },
   questionBlock: { marginBottom: 20 },
   questionText: { color: '#ffffffcc', fontSize: 16, fontWeight: '600', marginBottom: 8 },
